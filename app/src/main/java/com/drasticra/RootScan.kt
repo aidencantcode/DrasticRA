@@ -11,12 +11,12 @@ import java.io.RandomAccessFile
  * where the main RAM block lives. Prints everything to stdout so the app can show it.
  */
 object RootScan {
-    private const val RAM_SIZE = 0x400000L
-    private const val HDR_OFF = 0x3FFE00L
-    private const val CHUNK = 1 shl 20
+    internal const val RAM_SIZE = 0x400000L
+    internal const val HDR_OFF = 0x3FFE00L
+    internal const val CHUNK = 1 shl 20
     private const val MAX_MATCHES = 20
 
-    private class Region(val start: Long, val end: Long, val perms: String, val path: String) {
+    internal class Region(val start: Long, val end: Long, val perms: String, val path: String) {
         val size: Long get() = end - start
     }
 
@@ -135,7 +135,7 @@ object RootScan {
     }
 
     /** Real DS headers: ASCII title, uppercase game code + maker code, reserved bytes at 0x15..0x1B are zero. */
-    private fun looksLikeHeader(b: ByteArray, p: Int): Boolean {
+    internal fun looksLikeHeader(b: ByteArray, p: Int): Boolean {
         var letters = 0
         var i = 0
         while (i < 12) {
@@ -160,7 +160,7 @@ object RootScan {
         return true
     }
 
-    private fun readAt(mem: RandomAccessFile, addr: Long, buf: ByteArray, len: Int): Int {
+    internal fun readAt(mem: RandomAccessFile, addr: Long, buf: ByteArray, len: Int): Int {
         var got = 0
         try {
             mem.seek(addr)
@@ -175,7 +175,7 @@ object RootScan {
         return got
     }
 
-    private fun readRegions(pid: Int): List<Region> {
+    internal fun readRegions(pid: Int): List<Region> {
         val out = ArrayList<Region>()
         File("/proc/$pid/maps").forEachLine { line ->
             val f = line.trim().split(Regex("\\s+"), 6)
@@ -197,7 +197,7 @@ object RootScan {
         return out
     }
 
-    private fun findPid(pkg: String): Int {
+    internal fun findPid(pkg: String): Int {
         val dirs = File("/proc").listFiles() ?: return -1
         for (d in dirs) {
             val pid = d.name.toIntOrNull() ?: continue

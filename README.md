@@ -1,19 +1,20 @@
 # Drastic RA
 
-Companion app that watches DraStic (unmodified) via root, to bring RetroAchievements to it.
+Companion app that watches DraStic (unmodified) via root and brings RetroAchievements (softcore) to it.
 
-## Status
-- Step 1 (this build): find DraStic's 4 MB DS main RAM block in its process memory.
-- Step 2: rcheevos (rc_client) reading that RAM at ~60 Hz, RA login + ROM hash.
-- Step 3: overlay popups for unlocks / progress.
+## How it works
+- A root helper (`RootServer`) finds DraStic's 4 MB DS main RAM and serves 4 KiB pages over loopback.
+- rcheevos (`rc_client`, fetched by the workflow at build time) runs in the app at 60 Hz on that RAM.
+- Unlocks and progress show as an overlay popup at the top of the screen.
 
 ## Build (no PC needed)
-1. Create a GitHub repo, upload the contents of this folder (keep the `.github` folder).
-2. Actions tab -> "Build APK" runs automatically (or Run workflow).
-3. Open the finished run -> Artifacts -> `DrasticRA-apk` -> install the APK.
-
-The APK is signed with the bundled `app/dsra.keystore` so later builds update in place.
+1. Upload the contents of this folder to a GitHub repo (keep the `.github` folder).
+2. Actions -> "Build APK" runs on push. When done, grab the APK from Releases.
 
 ## Use
-Start DraStic, load a game, open Drastic RA, tap **Scan DraStic RAM**, grant root, then
-**Share / copy log** and send the log back.
+1. Start DraStic and load a game.
+2. Open Drastic RA, enter your RA username + password (password only the first time; a token is saved),
+   set the ROM folder, tap **Start watching**.
+3. Grant "All files access" when asked, then go back to DraStic and play.
+
+Diagnostics: **RAM scan** / **Live test** / **Share log**.

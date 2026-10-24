@@ -23,6 +23,14 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
+      - name: Fetch rcheevos (newest v11.x release)
+        run: |
+          git clone https://github.com/RetroAchievements/rcheevos app/src/main/cpp/rcheevos
+          cd app/src/main/cpp/rcheevos
+          TAG=$(git tag -l 'v11.*' --sort=-v:refname | head -n1)
+          echo "rcheevos tag: ${TAG:-<default branch>}"
+          if [ -n "$TAG" ]; then git checkout "$TAG"; fi
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
