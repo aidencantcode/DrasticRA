@@ -49,7 +49,7 @@ class EngineService : Service() {
     private val http = Executors.newFixedThreadPool(3)
     private val done = ConcurrentLinkedQueue<HttpResult>()
     private val ui = Handler(Looper.getMainLooper())
-    private var overlay: View? = null
+    private val popup by lazy { Popup(this) }
     private var ua = "DrasticRA/0.2.0"
     @Volatile private var loginState = 0
     @Volatile private var gameState = 0
@@ -288,7 +288,7 @@ class EngineService : Service() {
                 val t = p.getOrElse(1) { "?" }
                 val msg = p.getOrElse(2) { "0" } + " achievements, " + p.getOrElse(3) { "0" } + " unlocked"
                 AppLog.add("Game: $t - $msg (" + p.getOrElse(4) { "0" } + " pts)")
-                popup(t, msg, null, 4000)
+                popup.show(t, msg, null, 4000)
                 gameState = 1
             }
             "GAME_ERR" -> {
@@ -297,86 +297,17 @@ class EngineService : Service() {
             }
             "UNLOCK" -> {
                 AppLog.add("UNLOCKED: " + p.getOrElse(1) { "" } + " (" + p.getOrElse(3) { "0" } + " pts)")
-                popup("Achievement Unlocked", p.getOrElse(1) { "" } + " - " + p.getOrElse(2) { "" } + " (" + p.getOrElse(3) { "0" } + ")", p.getOrElse(4) { "" }, 6000)
+                popup.show("Achievement Unlocked", p.getOrElse(1) { "" } + " - " + p.getOrElse(2) { "" } + " (" + p.getOrElse(3) { "0" } + ")", p.getOrElse(4) { "" }, 6000)
             }
-            "PROGRESS" -> popup(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" }, 2500)
+            "PROGRESS" -> popup.show(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" }, 2500)
             "MASTERED" -> {
                 AppLog.add("Game mastered!")
-                popup("Game complete", "You earned every achievement", null, 6000)
+                popup.show("Game complete", "You earned every achievement", null, 6000)
             }
             "SERVER_ERROR" -> AppLog.add("server error reported by rcheevos")
             "LOST" -> {
                 AppLog.add("Lost connection to the RAM helper (DraStic closed?). Stopping.")
                 stopFlag = true
-            }
-        }
-    }
-
-    private fun removeOverlay() {
-        val v = overlay ?: return
-        try {
-            (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(v)
-        } catch (_: Exception) {
-        }
-        overlay = null
-    }
-
-    private fun popup(title: String, desc: String, badge: String?, ms: Long) {
-        ui.post {
-            try {
-                if (!Settings.canDrawOverlays(this)) throw IllegalStateException("no overlay permission")
-                removeOverlay()
-                val d = resources.displayMetrics.density
-                val row = LinearLayout(this)
-                row.orientation = LinearLayout.HORIZONTAL
-                row.gravity = Gravity.CENTER_VERTICAL
-                row.setPadding((12 * d).toInt(), (10 * d).toInt(), (16 * d).toInt(), (10 * d).toInt())
-                val bg = GradientDrawable()
-                bg.setColor(0xEE202020.toInt())
-                bg.cornerRadius = 14 * d
-                row.background = bg
-                val img = ImageView(this)
-                val ilp = LinearLayout.LayoutParams((44 * d).toInt(), (44 * d).toInt())
-                ilp.rightMargin = (12 * d).toInt()
-                row.addView(img, ilp)
-                val col = LinearLayout(this)
-                col.orientation = LinearLayout.VERTICAL
-                val t1 = TextView(this)
-                t1.text = title
-                t1.setTextColor(Color.WHITE)
-                t1.textSize = 15f
-                t1.typeface = Typeface.DEFAULT_BOLD
-                val t2 = TextView(this)
-                t2.text = desc
-                t2.setTextColor(0xFFCCCCCC.toInt())
-                t2.textSize = 12f
-                t2.maxWidth = (300 * d).toInt()
-                col.addView(t1)
-                col.addView(t2)
-                row.addView(col)
-                val lp = WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-                    PixelFormat.TRANSLUCENT
-                )
-                lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                lp.y = (20 * d).toInt()
-                (getSystemService(WINDOW_SERVICE) as WindowManager).addView(row, lp)
-                overlay = row
-                ui.postDelayed({ if (overlay === row) removeOverlay() }, ms)
-                if (!badge.isNullOrEmpty()) {
-                    http.execute {
-                        try {
-                            val bmp = BitmapFactory.decodeStream(URL("https://media.retroachievements.org/Badge/$badge.png").openStream())
-                            ui.post { img.setImageBitmap(bmp) }
-                        } catch (_: Exception) {
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Toast.makeText(this, "$title\n$desc", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -392,6 +323,6 @@ class EngineService : Service() {
             rootProc?.destroy()
         } catch (_: Exception) {
         }
-        ui.post { removeOverlay() }
+        popup.hide()
     }
 }

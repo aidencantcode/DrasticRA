@@ -79,6 +79,10 @@ class MainActivity : Activity() {
         row2.addView(btn("Live test") { runScan(true) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         row2.addView(btn("Share log") { shareLog() }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(row2)
+        val row3 = LinearLayout(this)
+        row3.orientation = LinearLayout.HORIZONTAL
+        row3.addView(btn("Test popup (5 s delay - switch to DraStic!)") { testPopup() }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(row3)
 
         scroll = ScrollView(this)
         logView = TextView(this)
@@ -136,6 +140,28 @@ class MainActivity : Activity() {
                 i.putExtra("user", user).putExtra("pass", pass).putExtra("folder", folder).putExtra("pkg", pkg)
                 startForegroundService(i)
                 passIn.setText("")
+            }
+        }.start()
+    }
+
+    private fun testPopup() {
+        AppLog.add("popup test: grant overlay permission via root, popups come in 5 s...")
+        Thread {
+            rootSh("appops set $packageName SYSTEM_ALERT_WINDOW allow")
+            runOnUiThread {
+                if (!Settings.canDrawOverlays(this)) {
+                    AppLog.add("Overlay permission still off: enable 'Display over other apps' for Drastic RA, then test again.")
+                    startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                    return@runOnUiThread
+                }
+                val pop = Popup(applicationContext)
+                val h = android.os.Handler(mainLooper)
+                h.postDelayed({
+                    pop.show("Achievement Unlocked", "Test Achievement - this is what an unlock looks like (10)", null, 5000)
+                }, 5000)
+                h.postDelayed({
+                    pop.show("Test Achievement", "Progress: 3/10", null, 3000)
+                }, 11000)
             }
         }.start()
     }
