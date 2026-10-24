@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: write   # needed to create releases
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -31,3 +34,14 @@ jobs:
         with:
           name: DrasticRA-apk
           path: app/build/outputs/apk/debug/*.apk
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk "DrasticRA-build${{ github.run_number }}.apk"
+          gh release create "build-${{ github.run_number }}" \
+            "DrasticRA-build${{ github.run_number }}.apk" \
+            --target "${{ github.sha }}" \
+            --title "Drastic RA build ${{ github.run_number }}" \
+            --notes "Automated build of commit ${{ github.sha }}"

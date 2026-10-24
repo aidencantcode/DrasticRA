@@ -23,7 +23,8 @@ object RootScan {
     @JvmStatic
     fun main(args: Array<String>) {
         val pkg = if (args.isNotEmpty()) args[0] else "com.dsemu.drastic"
-        println("Drastic RA scan v1 | device=" + android.os.Build.MODEL + " | sdk=" + android.os.Build.VERSION.SDK_INT)
+        val live = args.size > 1 && args[1] == "live"
+        println("Drastic RA scan v2 | device=" + android.os.Build.MODEL + " | sdk=" + android.os.Build.VERSION.SDK_INT)
         println("uid=" + android.os.Process.myUid() + " (must be 0 = root)")
         println("target package: $pkg")
 
@@ -43,6 +44,7 @@ object RootScan {
         val t0 = System.currentTimeMillis()
         var scanned = 0L
         var matches = 0
+        var firstBase = -1L
         val buf = ByteArray(CHUNK)
         try {
             RandomAccessFile("/proc/$pid/mem", "r").use { mem ->
@@ -56,7 +58,8 @@ object RootScan {
                         while (p + 0x20 <= got) {
                             if (looksLikeHeader(buf, p)) {
                                 matches++
-                                report(r, r.start + off + p, buf, p)
+                                val b = report(r, r.start + off + p, buf, p)
+                                if (firstBase < 0) firstBase = b
                                 if (matches >= MAX_MATCHES) break
                             }
                             p += 0x1000
@@ -81,11 +84,44 @@ object RootScan {
             }
         } else {
             println("RESULT: $matches candidate(s) for DS main RAM")
+            if (live && firstBase >= 0) liveLoop(pid, firstBase)
         }
         System.exit(0)
     }
 
-    private fun report(r: Region, hdrAddr: Long, buf: ByteArray, p: Int) {
+    /** Proves the block is the LIVE emulated RAM: counts bytes that change each second while the game runs. */
+    private fun liveLoop(pid: Int, base: Long) {
+        println("LIVE: sampling main RAM for 15 s - keep the game running (walk around, open menus)")
+        val size = RAM_SIZE.toInt()
+        var prev = ByteArray(size)
+        var cur = ByteArray(size)
+        try {
+            RandomAccessFile("/proc/$pid/mem", "r").use { mem ->
+                if (readAt(mem, base, prev, size) < size) {
+                    println("LIVE: read failed")
+                    return
+                }
+                for (sec in 1..15) {
+                    Thread.sleep(1000)
+                    if (readAt(mem, base, cur, size) < size) {
+                        println("LIVE: read failed")
+                        return
+                    }
+                    var changed = 0
+                    for (i in 0 until size) if (prev[i] != cur[i]) changed++
+                    println("LIVE t=" + sec + "s changedBytes=" + changed)
+                    val t = prev
+                    prev = cur
+                    cur = t
+                }
+            }
+        } catch (e: IOException) {
+            println("LIVE: error ${e.message}")
+        }
+        println("LIVE: done. changedBytes>0 while playing = this is the live game RAM.")
+    }
+
+    private fun report(r: Region, hdrAddr: Long, buf: ByteArray, p: Int): Long {
         val base = hdrAddr - HDR_OFF
         val title = String(buf, p, 12, Charsets.US_ASCII).trim { it == '\u0000' || it == ' ' }
         val code = String(buf, p + 12, 4, Charsets.US_ASCII)
@@ -95,6 +131,7 @@ object RootScan {
         println("  ramBase=0x%x  headerAt=0x%x".format(base, hdrAddr))
         println("  region=0x%x-0x%x perms=%s path=%s".format(r.start, r.end, r.perms, r.path))
         println("  ram block fully inside region: $inside")
+        return base
     }
 
     /** Real DS headers: ASCII title, uppercase game code + maker code, reserved bytes at 0x15..0x1B are zero. */

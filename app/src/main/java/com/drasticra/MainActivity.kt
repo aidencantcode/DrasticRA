@@ -30,7 +30,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad, pad, pad)
         }
         root.addView(TextView(this).apply {
-            text = "Drastic RA - step 1: find DraStic's DS RAM"
+            text = "Drastic RA - step 1b: find DraStic's DS RAM"
             textSize = 18f
         })
         root.addView(TextView(this).apply {
@@ -47,9 +47,13 @@ class MainActivity : Activity() {
 
         scanBtn = Button(this).apply {
             text = "Scan DraStic RAM (root)"
-            setOnClickListener { runScan() }
+            setOnClickListener { runScan(false) }
         }
         root.addView(scanBtn)
+        root.addView(Button(this).apply {
+            text = "Live RAM test (15 s)"
+            setOnClickListener { runScan(true) }
+        })
         root.addView(Button(this).apply {
             text = "Share / copy log"
             setOnClickListener { shareLog() }
@@ -73,14 +77,14 @@ class MainActivity : Activity() {
 
     private fun shq(s: String) = "'" + s.replace("'", "'\\''") + "'"
 
-    private fun runScan() {
+    private fun runScan(live: Boolean) {
         val pkg = pkgInput.text.toString().trim()
         logView.text = ""
         scanBtn.isEnabled = false
         val apk = applicationInfo.sourceDir
         Thread {
             try {
-                val cmd = "CLASSPATH=${shq(apk)} app_process /system/bin com.drasticra.RootScan ${shq(pkg)}"
+                val cmd = "CLASSPATH=${shq(apk)} app_process /system/bin com.drasticra.RootScan ${shq(pkg)}${if (live) " live" else ""}"
                 append("running as root...")
                 val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
                 BufferedReader(InputStreamReader(p.inputStream)).use { r ->
