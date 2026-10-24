@@ -63,6 +63,7 @@ class EngineService : Service() {
         }
         if (running) return START_NOT_STICKY
         startForeground(1, notification("Starting..."))
+        AppLog.setStatus("Starting...", true)
         val user = intent?.getStringExtra("user") ?: ""
         val pass = intent?.getStringExtra("pass") ?: ""
         val folder = intent?.getStringExtra("folder") ?: ""
@@ -80,6 +81,7 @@ class EngineService : Service() {
                 cleanup()
                 running = false
                 AppLog.add("stopped.")
+                AppLog.setStatus("Idle", false)
                 stopSelf()
             }
         }.start()
@@ -288,7 +290,8 @@ class EngineService : Service() {
                 val t = p.getOrElse(1) { "?" }
                 val msg = p.getOrElse(2) { "0" } + " achievements, " + p.getOrElse(3) { "0" } + " unlocked"
                 AppLog.add("Game: $t - $msg (" + p.getOrElse(4) { "0" } + " pts)")
-                popup.show(t, msg, null, 4000)
+                popup.show("GAME LOADED", t, msg, null, 4000)
+                AppLog.setStatus("Watching: " + t, true)
                 gameState = 1
             }
             "GAME_ERR" -> {
@@ -297,12 +300,12 @@ class EngineService : Service() {
             }
             "UNLOCK" -> {
                 AppLog.add("UNLOCKED: " + p.getOrElse(1) { "" } + " (" + p.getOrElse(3) { "0" } + " pts)")
-                popup.show("Achievement Unlocked", p.getOrElse(1) { "" } + " - " + p.getOrElse(2) { "" } + " (" + p.getOrElse(3) { "0" } + ")", p.getOrElse(4) { "" }, 6000)
+                popup.show("ACHIEVEMENT UNLOCKED", p.getOrElse(1) { "" }, p.getOrElse(2) { "" } + "   -   " + p.getOrElse(3) { "0" } + " pts", p.getOrElse(4) { "" }, 6000)
             }
-            "PROGRESS" -> popup.show(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" }, 2500)
+            "PROGRESS" -> popup.show("PROGRESS", p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" }, 2500)
             "MASTERED" -> {
                 AppLog.add("Game mastered!")
-                popup.show("Game complete", "You earned every achievement", null, 6000)
+                popup.show("GAME MASTERED", "Game complete", "You earned every achievement", null, 6000)
             }
             "SERVER_ERROR" -> AppLog.add("server error reported by rcheevos")
             "LOST" -> {

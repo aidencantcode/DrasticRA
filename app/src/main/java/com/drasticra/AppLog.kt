@@ -3,6 +3,15 @@ package com.drasticra
 object AppLog {
     private val buf = StringBuilder()
     @Volatile var listener: ((String) -> Unit)? = null
+    @Volatile var status = "Idle"
+    @Volatile var active = false
+    @Volatile var statusListener: (() -> Unit)? = null
+
+    fun setStatus(s: String, a: Boolean) {
+        status = s
+        active = a
+        statusListener?.invoke()
+    }
 
     @Synchronized
     fun add(s: String) {
