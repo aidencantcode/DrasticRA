@@ -173,9 +173,9 @@ static void game_cb(int result, const char* err, rc_client_t* c, void*) {
         memset(&sum, 0, sizeof sum);
         rc_client_get_user_game_summary(c, &sum);
         char buf[1024];
-        snprintf(buf, sizeof buf, "GAME_OK" SEP "%s" SEP "%u" SEP "%u" SEP "%u" SEP "%u",
+        snprintf(buf, sizeof buf, "GAME_OK" SEP "%s" SEP "%u" SEP "%u" SEP "%u" SEP "%u" SEP "%s" SEP "%u",
                  S(g->title), (unsigned)sum.num_core_achievements, (unsigned)sum.num_unlocked_achievements,
-                 (unsigned)sum.points_core, (unsigned)sum.points_unlocked);
+                 (unsigned)sum.points_core, (unsigned)sum.points_unlocked, S(g->badge_name), (unsigned)g->id);
         push_event(buf);
     } else {
         push_event(std::string("GAME_ERR" SEP) + S(err));
@@ -304,6 +304,22 @@ JNIEXPORT void JNICALL Java_com_drasticra_Native_shutdown(JNIEnv*, jobject) {
         g_client = nullptr;
     }
     drop_fd();
+}
+
+JNIEXPORT jint JNICALL Java_com_drasticra_Native_readHeader(JNIEnv* env, jobject, jbyteArray out) {
+    if (g_fd < 0) return -1;
+    char cmd = 'H';
+    if (!write_all(&cmd, 1)) { drop_fd(); return -1; }
+    uint8_t buf[1 + 0x200];
+    if (!read_all(buf, sizeof buf)) { drop_fd(); return -1; }
+    env->SetByteArrayRegion(out, 0, 0x200, (const jbyte*)(buf + 1));
+    return buf[0] == 1 ? 1 : 0;
+}
+
+JNIEXPORT void JNICALL Java_com_drasticra_Native_unload(JNIEnv*, jobject) {
+    if (g_client) rc_client_unload_game(g_client);
+    memset(g_used, 0, sizeof g_used);
+    memset(g_have, 0, sizeof g_have);
 }
 
 } // extern "C"

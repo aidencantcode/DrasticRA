@@ -35,7 +35,18 @@ object RootServer {
                 if (cmd == 'H'.code) {
                     val h = ByteArray(0x200)
                     var st = 0
-                    if (ensure(pkg) && readRange(base + RootScan.HDR_OFF, h, 0, 0x200) == 0x200) st = 1
+                    var ok = ensure(pkg) && readRange(base + RootScan.HDR_OFF, h, 0, 0x200) == 0x200 &&
+                        RootScan.looksLikeHeader(h, 0)
+                    if (!ok) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastLocate > 1000) {
+                            lastLocate = now
+                            base = -1L
+                            ok = ensure(pkg) && readRange(base + RootScan.HDR_OFF, h, 0, 0x200) == 0x200 &&
+                                RootScan.looksLikeHeader(h, 0)
+                        }
+                    }
+                    if (ok) st = 1
                     out.write(st)
                     out.write(h)
                     out.flush()

@@ -3,26 +3,12 @@ package com.drasticra
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
-import android.graphics.BitmapFactory
-import android.graphics.Color
-import android.graphics.PixelFormat
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.os.Environment
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.os.ParcelFileDescriptor
-import android.provider.Settings
-import android.view.Gravity
-import android.view.View
-import android.view.WindowManager
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.TextView
-import android.widget.Toast
 import java.io.DataInputStream
 import java.io.File
 import java.io.FileInputStream
@@ -48,11 +34,24 @@ class EngineService : Service() {
     private var nativeReady = false
     private val http = Executors.newFixedThreadPool(3)
     private val done = ConcurrentLinkedQueue<HttpResult>()
-    private val ui = Handler(Looper.getMainLooper())
-    private val popup by lazy { Popup(this) }
-    private var ua = "DrasticRA/0.2.0"
+    private val popup by lazy { Popup(applicationContext) }
+    private var ua = "DrasticRA/0.3.0"
     @Volatile private var loginState = 0
     @Volatile private var gameState = 0
+    @Volatile private var gameTitle = ""
+    private var phraseIdx = 0
+    private val phrases = arrayOf(
+        "Peeping at your memory",
+        "Spying on every achievement",
+        "Fathoming DraStic's RAM",
+        "Eavesdropping on the DS",
+        "Keeping a watchful eye",
+        "Sniffing out unlocks",
+        "Lurking behind DraStic",
+        "Squinting at your progress",
+        "Staking out those trophies",
+        "Watching over your save data"
+    )
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -62,7 +61,7 @@ class EngineService : Service() {
             return START_NOT_STICKY
         }
         if (running) return START_NOT_STICKY
-        startForeground(1, notification("Starting..."))
+        startForeground(1, notification("Waking up...", null))
         AppLog.setStatus("Starting...", true)
         val user = intent?.getStringExtra("user") ?: ""
         val pass = intent?.getStringExtra("pass") ?: ""
@@ -72,6 +71,7 @@ class EngineService : Service() {
         stopFlag = false
         loginState = 0
         gameState = 0
+        gameTitle = ""
         Thread {
             try {
                 engine(user, pass, folder, pkg)
@@ -93,19 +93,25 @@ class EngineService : Service() {
         super.onDestroy()
     }
 
-    private fun notification(text: String): Notification {
+    private fun notification(text: String, sub: String?): Notification {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel("dsra", "Drastic RA", NotificationManager.IMPORTANCE_LOW))
-        return Notification.Builder(this, "dsra")
+        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val b = Notification.Builder(this, "dsra")
             .setContentTitle("Drastic RA")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(pi)
             .setOngoing(true)
-            .build()
+        if (sub != null) b.setSubText(sub)
+        return b.build()
     }
 
-    private fun setStatus(text: String) {
-        getSystemService(NotificationManager::class.java).notify(1, notification(text))
+    private fun rotatePhrase() {
+        val t = phrases[phraseIdx % phrases.size]
+        phraseIdx++
+        val sub = if (gameTitle.isEmpty()) "Waiting for DraStic" else gameTitle
+        getSystemService(NotificationManager::class.java).notify(1, notification("Drastic RA is $t...", sub))
     }
 
     private fun engine(user: String, pass: String, folder: String, pkg: String) {
@@ -136,33 +142,11 @@ class EngineService : Service() {
         }
         ss.close()
         sock.tcpNoDelay = true
-        val out = sock.getOutputStream()
-        val inp = DataInputStream(sock.getInputStream())
-        out.write('H'.code)
-        out.flush()
-        val status = inp.readUnsignedByte()
-        val hdr = ByteArray(0x200)
-        inp.readFully(hdr)
-        if (status != 1) {
-            AppLog.add("ERROR: DS RAM not found. Start DraStic and load a game first, then press Start.")
-            return
-        }
-        val title = String(hdr, 0, 12, Charsets.US_ASCII).trim { it == '\u0000' || it == ' ' }
-        val code = String(hdr, 12, 4, Charsets.US_ASCII)
-        AppLog.add("DraStic is running: $title ($code)")
 
-        // 2) find the ROM file that matches
-        val rom = findRom(folder, hdr)
-        if (rom == null) {
-            AppLog.add("ERROR: no .nds file in '$folder' matches $code. Check the ROM folder.")
-            return
-        }
-        AppLog.add("ROM: " + rom.absolutePath)
-
-        // 3) rcheevos
+        // 2) rcheevos + login
         Native.create()
         nativeReady = true
-        ua = "DrasticRA/0.2.0 " + Native.userAgentClause()
+        ua = "DrasticRA/0.3.0 " + Native.userAgentClause()
         val savedToken = prefs.getString("token", "") ?: ""
         val savedUser = prefs.getString("user_ra", "") ?: ""
         if (pass.isNotEmpty()) {
@@ -178,31 +162,86 @@ class EngineService : Service() {
             AppLog.add("ERROR: login failed or timed out.")
             return
         }
+        Native.attach(ParcelFileDescriptor.fromSocket(sock).detachFd())
 
-        val fd = ParcelFileDescriptor.fromSocket(sock).detachFd()
-        Native.attach(fd)
+        // 3) supervise DraStic: wait for a game, track it, notice when it changes
+        val hdr = ByteArray(0x200)
+        var current: ByteArray? = null
+        var gameLoaded = false
+        var nextHdr = 0L
+        var nextPhrase = 0L
+        val period = 1_000_000_000L / 60
+        var next = System.nanoTime()
+        AppLog.setStatus("Waiting for DraStic...", true)
+        AppLog.add("Ready. Launch a game in DraStic - I'll pick it up automatically.")
+        while (!stopFlag) {
+            val now = System.currentTimeMillis()
+            if (now >= nextPhrase) {
+                rotatePhrase()
+                nextPhrase = now + 12000
+            }
+            if (now >= nextHdr) {
+                val r = Native.readHeader(hdr)
+                if (r < 0) {
+                    AppLog.add("Lost connection to the RAM helper.")
+                    break
+                }
+                nextHdr = now + (if (gameLoaded) 2000 else 3000)
+                val same = current != null && java.util.Arrays.equals(current, hdr.copyOf(16))
+                if (r == 1 && !same) {
+                    if (gameLoaded) {
+                        Native.unload()
+                        gameLoaded = false
+                    }
+                    current = hdr.copyOf(16)
+                    gameTitle = ""
+                    gameLoaded = loadGameFor(hdr, folder)
+                    next = System.nanoTime()
+                    if (!gameLoaded) AppLog.setStatus("Waiting for DraStic...", true)
+                } else if (r == 0 && current != null) {
+                    if (gameLoaded) Native.unload()
+                    gameLoaded = false
+                    current = null
+                    gameTitle = ""
+                    AppLog.setStatus("Waiting for DraStic...", true)
+                }
+            }
+            if (gameLoaded) {
+                Native.doFrame()
+                pump()
+                next += period
+                val sleepNs = next - System.nanoTime()
+                if (sleepNs > 0) {
+                    Thread.sleep(sleepNs / 1_000_000, (sleepNs % 1_000_000).toInt())
+                } else if (sleepNs < -period * 5) {
+                    next = System.nanoTime()
+                }
+            } else {
+                Native.idle()
+                pump()
+                Thread.sleep(40)
+            }
+        }
+    }
+
+    private fun loadGameFor(hdr: ByteArray, folder: String): Boolean {
+        val title = String(hdr, 0, 12, Charsets.US_ASCII).trim { it == '\u0000' || it == ' ' }
+        val code = String(hdr, 12, 4, Charsets.US_ASCII)
+        AppLog.add("DraStic is running: $title ($code)")
+        val rom = findRom(folder, hdr)
+        if (rom == null) {
+            AppLog.add("ERROR: no .nds file in '$folder' matches $code. Check the ROM folder.")
+            return false
+        }
+        AppLog.add("ROM: " + rom.absolutePath)
+        gameState = 0
         Native.loadGame(rom.absolutePath)
         AppLog.add("identifying game...")
         if (!waitFor(60000) { gameState != 0 } || gameState != 1) {
-            AppLog.add("ERROR: game not loaded.")
-            return
+            AppLog.add("ERROR: game not loaded (unknown to RetroAchievements?).")
+            return false
         }
-        setStatus("Watching $title")
-        AppLog.add("WATCHING. Switch to DraStic and play.")
-
-        val period = 1_000_000_000L / 60
-        var next = System.nanoTime()
-        while (!stopFlag) {
-            Native.doFrame()
-            pump()
-            next += period
-            val sleepNs = next - System.nanoTime()
-            if (sleepNs > 0) {
-                Thread.sleep(sleepNs / 1_000_000, (sleepNs % 1_000_000).toInt())
-            } else if (sleepNs < -period * 5) {
-                next = System.nanoTime()
-            }
-        }
+        return true
     }
 
     private fun findRom(folder: String, hdr: ByteArray): File? {
@@ -288,10 +327,14 @@ class EngineService : Service() {
             }
             "GAME_OK" -> {
                 val t = p.getOrElse(1) { "?" }
-                val msg = p.getOrElse(2) { "0" } + " achievements, " + p.getOrElse(3) { "0" } + " unlocked"
-                AppLog.add("Game: $t - $msg (" + p.getOrElse(4) { "0" } + " pts)")
-                popup.show("GAME LOADED", t, msg, null, 4000)
-                AppLog.setStatus("Watching: " + t, true)
+                val total = p.getOrElse(2) { "0" }.toIntOrNull() ?: 0
+                val got = p.getOrElse(3) { "0" }.toIntOrNull() ?: 0
+                val ptsTotal = p.getOrElse(4) { "0" }
+                val pts = p.getOrElse(5) { "0" }
+                gameTitle = t
+                AppLog.add("Game: $t - $got / $total achievements ($pts / $ptsTotal pts)")
+                AppLog.setStatus("Watching: $t", true)
+                popup.showGame(t, p.getOrElse(6) { "" }, got, total, "$pts / $ptsTotal points", 6000)
                 gameState = 1
             }
             "GAME_ERR" -> {
@@ -300,7 +343,11 @@ class EngineService : Service() {
             }
             "UNLOCK" -> {
                 AppLog.add("UNLOCKED: " + p.getOrElse(1) { "" } + " (" + p.getOrElse(3) { "0" } + " pts)")
-                popup.show("ACHIEVEMENT UNLOCKED", p.getOrElse(1) { "" }, p.getOrElse(2) { "" } + "   -   " + p.getOrElse(3) { "0" } + " pts", p.getOrElse(4) { "" }, 6000)
+                popup.show(
+                    "ACHIEVEMENT UNLOCKED", p.getOrElse(1) { "" },
+                    p.getOrElse(2) { "" } + "   -   " + p.getOrElse(3) { "0" } + " pts",
+                    p.getOrElse(4) { "" }, 6000
+                )
             }
             "PROGRESS" -> popup.show("PROGRESS", p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" }, 2500)
             "MASTERED" -> {
@@ -309,7 +356,7 @@ class EngineService : Service() {
             }
             "SERVER_ERROR" -> AppLog.add("server error reported by rcheevos")
             "LOST" -> {
-                AppLog.add("Lost connection to the RAM helper (DraStic closed?). Stopping.")
+                AppLog.add("Lost connection to the RAM helper. Stopping.")
                 stopFlag = true
             }
         }

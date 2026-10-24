@@ -17,5 +17,7 @@ object Native {
     external fun nextRequest(): Array<String>?
     external fun respond(id: Int, status: Int, body: ByteArray)
     external fun nextEvent(): String?
+    external fun readHeader(out: ByteArray): Int
+    external fun unload()
     external fun shutdown()
 }
