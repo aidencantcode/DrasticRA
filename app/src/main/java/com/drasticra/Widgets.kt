@@ -1,7 +1,7 @@
 package com.drasticra
 
 import android.content.Context
-import android.graphics.AnimatedImageDrawable
+import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
