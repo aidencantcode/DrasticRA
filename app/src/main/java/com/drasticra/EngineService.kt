@@ -35,7 +35,7 @@ class EngineService : Service() {
     private val http = Executors.newFixedThreadPool(3)
     private val done = ConcurrentLinkedQueue<HttpResult>()
     private val popup by lazy { Popup(applicationContext) }
-    private var ua = "DrasticRA/0.3.0"
+    private var ua = "DrasticRA/0.4.0"
     @Volatile private var loginState = 0
     @Volatile private var gameState = 0
     @Volatile private var gameTitle = ""
@@ -63,8 +63,6 @@ class EngineService : Service() {
         if (running) return START_NOT_STICKY
         startForeground(1, notification("Waking up...", null))
         AppLog.setStatus("Starting...", true)
-        val user = intent?.getStringExtra("user") ?: ""
-        val pass = intent?.getStringExtra("pass") ?: ""
         val folder = intent?.getStringExtra("folder") ?: ""
         val pkg = intent?.getStringExtra("pkg") ?: "com.dsemu.drastic"
         running = true
@@ -74,7 +72,7 @@ class EngineService : Service() {
         gameTitle = ""
         Thread {
             try {
-                engine(user, pass, folder, pkg)
+                engine(folder, pkg)
             } catch (e: Throwable) {
                 AppLog.add("ENGINE ERROR: $e")
             } finally {
@@ -114,7 +112,7 @@ class EngineService : Service() {
         getSystemService(NotificationManager::class.java).notify(1, notification("Drastic RA is $t...", sub))
     }
 
-    private fun engine(user: String, pass: String, folder: String, pkg: String) {
+    private fun engine(folder: String, pkg: String) {
         val prefs = getSharedPreferences("dsra", MODE_PRIVATE)
         if (!Environment.isExternalStorageManager()) {
             AppLog.add("ERROR: 'All files access' is not enabled for Drastic RA.")
@@ -146,20 +144,17 @@ class EngineService : Service() {
         // 2) rcheevos + login
         Native.create()
         nativeReady = true
-        ua = "DrasticRA/0.3.0 " + Native.userAgentClause()
-        val savedToken = prefs.getString("token", "") ?: ""
-        val savedUser = prefs.getString("user_ra", "") ?: ""
-        if (pass.isNotEmpty()) {
-            Native.login(user, pass)
-        } else if (savedToken.isNotEmpty() && savedUser.equals(user, true)) {
-            Native.loginToken(user, savedToken)
-        } else {
-            AppLog.add("ERROR: enter your RetroAchievements password.")
+        ua = "DrasticRA/0.4.0 " + Native.userAgentClause()
+        val token = prefs.getString("token", "") ?: ""
+        val user = prefs.getString("user_ra", "") ?: ""
+        if (token.isEmpty() || user.isEmpty()) {
+            AppLog.add("ERROR: log in first (open the menu -> Settings -> Account).")
             return
         }
+        Native.loginToken(user, token)
         AppLog.add("logging in...")
         if (!waitFor(30000) { loginState != 0 } || loginState != 1) {
-            AppLog.add("ERROR: login failed or timed out.")
+            AppLog.add("ERROR: login failed. If your session expired, log out and log in again in Settings.")
             return
         }
         Native.attach(ParcelFileDescriptor.fromSocket(sock).detachFd())
@@ -315,9 +310,6 @@ class EngineService : Service() {
         val p = e.split('\u001f')
         when (p[0]) {
             "LOGIN_OK" -> {
-                getSharedPreferences("dsra", MODE_PRIVATE).edit()
-                    .putString("token", p.getOrElse(3) { "" })
-                    .putString("user_ra", p.getOrElse(2) { "" }).apply()
                 AppLog.add("Logged in as " + p.getOrElse(1) { "?" })
                 loginState = 1
             }
@@ -334,7 +326,7 @@ class EngineService : Service() {
                 gameTitle = t
                 AppLog.add("Game: $t - $got / $total achievements ($pts / $ptsTotal pts)")
                 AppLog.setStatus("Watching: $t", true)
-                popup.showGame(t, p.getOrElse(6) { "" }, got, total, "$pts / $ptsTotal points", 6000)
+                popup.game(t, p.getOrElse(6) { "" }, got, total, "$pts / $ptsTotal pts")
                 gameState = 1
             }
             "GAME_ERR" -> {
@@ -343,16 +335,12 @@ class EngineService : Service() {
             }
             "UNLOCK" -> {
                 AppLog.add("UNLOCKED: " + p.getOrElse(1) { "" } + " (" + p.getOrElse(3) { "0" } + " pts)")
-                popup.show(
-                    "ACHIEVEMENT UNLOCKED", p.getOrElse(1) { "" },
-                    p.getOrElse(2) { "" } + "   -   " + p.getOrElse(3) { "0" } + " pts",
-                    p.getOrElse(4) { "" }, 6000
-                )
+                popup.unlock(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "0" }, p.getOrElse(4) { "" })
             }
-            "PROGRESS" -> popup.show("PROGRESS", p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" }, 2500)
+            "PROGRESS" -> popup.progress(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" })
             "MASTERED" -> {
                 AppLog.add("Game mastered!")
-                popup.show("GAME MASTERED", "Game complete", "You earned every achievement", null, 6000)
+                popup.mastered()
             }
             "SERVER_ERROR" -> AppLog.add("server error reported by rcheevos")
             "LOST" -> {
