@@ -35,10 +35,11 @@ class EngineService : Service() {
     private val http = Executors.newFixedThreadPool(3)
     private val done = ConcurrentLinkedQueue<HttpResult>()
     private val popup by lazy { Popup(applicationContext) }
-    private var ua = "DrasticRA/0.4.0"
+    private var ua = "DrasticRA/0.5.0"
     @Volatile private var loginState = 0
     @Volatile private var gameState = 0
     @Volatile private var gameTitle = ""
+    @Volatile private var totalPoints = 0
     private var phraseIdx = 0
     private val phrases = arrayOf(
         "Peeping at your memory",
@@ -144,7 +145,7 @@ class EngineService : Service() {
         // 2) rcheevos + login
         Native.create()
         nativeReady = true
-        ua = "DrasticRA/0.4.0 " + Native.userAgentClause()
+        ua = "DrasticRA/0.5.0 " + Native.userAgentClause()
         val token = prefs.getString("token", "") ?: ""
         val user = prefs.getString("user_ra", "") ?: ""
         if (token.isEmpty() || user.isEmpty()) {
@@ -152,6 +153,10 @@ class EngineService : Service() {
             return
         }
         Native.loginToken(user, token)
+        Thread {
+            val sc = Ra.score(user, token)
+            if (sc != null) totalPoints = sc
+        }.start()
         AppLog.add("logging in...")
         if (!waitFor(30000) { loginState != 0 } || loginState != 1) {
             AppLog.add("ERROR: login failed. If your session expired, log out and log in again in Settings.")
@@ -335,7 +340,11 @@ class EngineService : Service() {
             }
             "UNLOCK" -> {
                 AppLog.add("UNLOCKED: " + p.getOrElse(1) { "" } + " (" + p.getOrElse(3) { "0" } + " pts)")
-                popup.unlock(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "0" }, p.getOrElse(4) { "" })
+                val pts = p.getOrElse(3) { "0" }
+                val ptsN = pts.toIntOrNull() ?: 0
+                Unseen.add(this, UnseenItem(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, ptsN, p.getOrElse(4) { "" }, gameTitle))
+                if (totalPoints > 0) totalPoints += ptsN
+                popup.unlock(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, pts, p.getOrElse(4) { "" }, gameTitle, totalPoints)
             }
             "PROGRESS" -> popup.progress(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" })
             "MASTERED" -> {

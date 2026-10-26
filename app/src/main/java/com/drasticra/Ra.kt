@@ -13,13 +13,21 @@ class RaGame(
 )
 class RaAch(
     val title: String, val desc: String, val points: Int, val badge: String,
-    val game: String, val gameIcon: String, val console: String, val date: String
+    val game: String, val gameIcon: String, val console: String, val date: String, val gameId: Int
+)
+class RaAchDetail(
+    val id: Int, val title: String, val desc: String, val points: Int, val badge: String,
+    val earned: Boolean, val date: String, val order: Int
+)
+class RaGameDetail(
+    val id: Int, val title: String, val icon: String, val console: String,
+    val total: Int, val got: Int, val list: List<RaAchDetail>
 )
 class RaHome(val profile: RaProfile, val recent: List<RaGame>, val earned: List<RaAch>)
 class RaLogin(val ok: Boolean, val user: String, val token: String, val error: String)
 
 object Ra {
-    private const val UA = "DrasticRA/0.4.0"
+    private const val UA = "DrasticRA/0.5.0"
 
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
@@ -72,6 +80,54 @@ object Ra {
         }
     }
 
+    fun gameText(user: String, key: String, gameId: Int): String =
+        api("API_GetGameInfoAndUserProgress.php", user, key, "&g=$gameId&a=1")
+
+    private fun JSONObject.str(k: String): String = if (has(k) && !isNull(k)) optString(k) else ""
+
+    fun parseGame(text: String): RaGameDetail {
+        val j = JSONObject(text)
+        val list = ArrayList<RaAchDetail>()
+        val ach = j.optJSONObject("Achievements")
+        if (ach != null) {
+            val keys = ach.keys()
+            while (keys.hasNext()) {
+                val o = ach.optJSONObject(keys.next()) ?: continue
+                val d1 = o.str("DateEarned")
+                val d2 = o.str("DateEarnedHardcore")
+                val date = if (d1.isNotEmpty()) d1 else d2
+                list.add(
+                    RaAchDetail(
+                        o.optInt("ID"), o.str("Title"), o.str("Description"), o.optInt("Points"),
+                        o.str("BadgeName"), date.isNotEmpty(), date, o.optInt("DisplayOrder")
+                    )
+                )
+            }
+        }
+        list.sortWith(compareBy<RaAchDetail>({ it.order }, { it.id }))
+        val got = list.count { it.earned }
+        return RaGameDetail(j.optInt("ID"), j.str("Title"), j.str("ImageIcon"), j.str("ConsoleName"), list.size, got, list)
+    }
+
+    /** Current total points (softcore + hardcore) using the saved login token. */
+    fun score(user: String, token: String): Int? {
+        return try {
+            val c = URL("https://retroachievements.org/dorequest.php").openConnection() as HttpURLConnection
+            c.requestMethod = "POST"
+            c.doOutput = true
+            c.connectTimeout = 15000
+            c.readTimeout = 20000
+            c.setRequestProperty("User-Agent", UA)
+            c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            c.outputStream.use { it.write(("r=login2&u=" + enc(user) + "&t=" + enc(token)).toByteArray(Charsets.UTF_8)) }
+            val text = (if (c.responseCode >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.readText() ?: ""
+            val j = JSONObject(text)
+            if (j.optBoolean("Success")) j.optInt("Score") + j.optInt("SoftcoreScore") else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     fun parseSummary(text: String, user: String): RaHome {
         val j = JSONObject(text)
         val name = j.optString("User", user).ifEmpty { user }
@@ -92,7 +148,8 @@ object Ra {
                     val a = inner.optJSONObject(aids.next()) ?: continue
                     val item = RaAch(
                         a.optString("Title"), a.optString("Description"), a.optInt("Points"),
-                        a.optString("BadgeName"), a.optString("GameTitle"), "", "", a.optString("DateAwarded")
+                        a.optString("BadgeName"), a.optString("GameTitle"), "", "", a.optString("DateAwarded"),
+                        gid.toIntOrNull() ?: 0
                     )
                     earnedAll.add(item)
                     byGame.getOrPut(gid.toIntOrNull() ?: -1) { ArrayList() }.add(item)
@@ -126,7 +183,8 @@ object Ra {
             out.add(
                 RaAch(
                     o.optString("Title"), o.optString("Description"), o.optInt("Points"), o.optString("BadgeName"),
-                    o.optString("GameTitle"), o.optString("GameIcon"), o.optString("ConsoleName"), o.optString("Date")
+                    o.optString("GameTitle"), o.optString("GameIcon"), o.optString("ConsoleName"), o.optString("Date"),
+                    o.optInt("GameID")
                 )
             )
         }

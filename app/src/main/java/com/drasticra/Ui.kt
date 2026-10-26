@@ -24,6 +24,11 @@ const val MEDIA = "https://media.retroachievements.org"
 
 fun Int.withAlpha(a: Int): Int = (this and 0x00FFFFFF) or (a shl 24)
 
+fun Context.prefs(): android.content.SharedPreferences = getSharedPreferences("dsra", Context.MODE_PRIVATE)
+
+/** "full" = refraction glass, "lite" = frosted look without backdrop sampling, "off" = plain cards */
+fun Context.glassMode(): String = prefs().getString("glass_mode", "full") ?: "full"
+
 object Pal {
     var light = true
     var BG = 0
