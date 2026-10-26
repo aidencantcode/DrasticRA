@@ -39,6 +39,7 @@ class MainActivity : Activity() {
     internal lateinit var root: FrameLayout
     internal lateinit var bg: BackgroundHost
     private lateinit var mainLayer: LinearLayout
+    private lateinit var header: LinearLayout
     private lateinit var content: LinearLayout
     private lateinit var contentScroll: ScrollView
     private lateinit var profilePill: LinearLayout
@@ -123,8 +124,14 @@ class MainActivity : Activity() {
         val topBar = buildTopBar()
         val tabsRow = buildTabsRow()
         val bottomBar = buildBottomBar()
-        mainLayer.addView(topBar, ll(MATCH, WRAP))
-        mainLayer.addView(tabsRow, ll(MATCH, WRAP, t = 12))
+        // title bar + tabs share one holder so they can dissolve together while the list scrolls over them
+        header = LinearLayout(this)
+        header.orientation = LinearLayout.VERTICAL
+        header.clipChildren = false
+        header.clipToPadding = false
+        header.addView(topBar, ll(MATCH, WRAP))
+        header.addView(tabsRow, ll(MATCH, WRAP, t = 12))
+        mainLayer.addView(header, ll(MATCH, WRAP))
 
         contentScroll = ScrollView(this)
         contentScroll.clipToPadding = false
@@ -136,9 +143,21 @@ class MainActivity : Activity() {
         content.clipToPadding = false
         pad(content, 4, 10, 4, 14)
         contentScroll.addView(content)
-        contentScroll.setOnScrollChangeListener { _, _, _, _, _ -> GlassBackdrop.invalidateAll() }
+        contentScroll.setOnScrollChangeListener { _, _, y, _, _ ->
+            GlassBackdrop.invalidateAll()
+            updateHeaderFade(y)
+        }
         mainLayer.addView(contentScroll, ll(MATCH, 0, 1f))
-        mainLayer.addView(bottomBar, ll(MATCH, WRAP, t = 8))
+
+        // bottom bar sits on top of a white/black radial backdrop that overhangs it (up, left, right, down)
+        val bottomHolder = FrameLayout(this)
+        bottomHolder.clipChildren = false
+        bottomHolder.clipToPadding = false
+        val scrimLp = FrameLayout.LayoutParams(MATCH, MATCH)
+        scrimLp.setMargins(-dp(16), -dp(72), -dp(16), -dp(12))
+        bottomHolder.addView(BottomScrimView(this), scrimLp)
+        bottomHolder.addView(bottomBar, FrameLayout.LayoutParams(MATCH, WRAP))
+        mainLayer.addView(bottomHolder, ll(MATCH, WRAP, t = 8))
         root.addView(mainLayer, FrameLayout.LayoutParams(MATCH, MATCH))
 
         buildDrawer(savedInstanceState)
@@ -271,6 +290,18 @@ class MainActivity : Activity() {
         return row
     }
 
+    /**
+     * The title bar and tabs dissolve over the first ~64dp of scrolling, so cards sliding up over them never
+     * sit on a half see-through header. Once fully gone they are INVISIBLE (not focusable) until you scroll back.
+     */
+    private fun updateHeaderFade(scrollY: Int) {
+        val t = (scrollY / dp(64).toFloat()).coerceIn(0f, 1f)
+        val k = t * t * (3f - 2f * t)
+        header.alpha = 1f - k
+        header.translationY = -k * dp(12)
+        header.visibility = if (t >= 1f) View.INVISIBLE else View.VISIBLE
+    }
+
     // ---------- tabs ----------
     private fun styleTabs() {
         for (i in tabViews.indices) {
@@ -334,6 +365,8 @@ class MainActivity : Activity() {
 
     internal fun renderTab() {
         content.removeAllViews()
+        // a new list may clamp the scroll position, so re-check the header once it has been laid out
+        contentScroll.post { updateHeaderFade(contentScroll.scrollY) }
         val dsOnly = prefs.getBoolean("ds_only", false)
         val cards = ArrayList<View>()
         var emptyMsg = "Nothing here yet."

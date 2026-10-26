@@ -5,12 +5,15 @@ import android.graphics.Bitmap
 import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
-import android.graphics.Shader
+import android.graphics.SweepGradient
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -95,16 +98,30 @@ object ScreenGrab {
     }
 }
 
-/** Soft accent glow that flashes when the popup appears, then breathes. */
-class GlowView(ctx: Context) : View(ctx) {
-    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val rf = RectF()
+private fun lightenC(c: Int, t: Float): Int = Color.rgb(
+    (Color.red(c) + (255 - Color.red(c)) * t).toInt(),
+    (Color.green(c) + (255 - Color.green(c)) * t).toInt(),
+    (Color.blue(c) + (255 - Color.blue(c)) * t).toInt()
+)
+
+/**
+ * Lights up the very edges of the display with a soft accent glow whose colours travel slowly around
+ * the screen. It lives in its own full-screen, touch-through window behind the popup (so it can never
+ * change the popup's size), flashes when a popup appears, breathes while it is up, and fades with [fadeOut].
+ */
+class EdgeGlowView(ctx: Context) : View(ctx) {
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val maskPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val m = Matrix()
+    private val dst = RectF()
+    private var sweep: SweepGradient? = null
+    private var mask: Bitmap? = null
+    private val bornAt = SystemClock.uptimeMillis()
     private var flashAt = 0L
-    private var shader: LinearGradient? = null
+    private var closeAt = 0L
 
     init {
-        setLayerType(LAYER_TYPE_SOFTWARE, null)
-        p.maskFilter = BlurMaskFilter(ctx.dp(16).toFloat(), BlurMaskFilter.Blur.NORMAL)
+        maskPaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
     }
 
     fun flash() {
@@ -112,24 +129,66 @@ class GlowView(ctx: Context) : View(ctx) {
         invalidate()
     }
 
+    fun fadeOut() {
+        if (closeAt == 0L) closeAt = SystemClock.uptimeMillis()
+        invalidate()
+    }
+
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         super.onSizeChanged(w, h, ow, oh)
-        shader = LinearGradient(0f, 0f, w.toFloat(), h.toFloat(), Pal.ACC1, Pal.ACC2, Shader.TileMode.CLAMP)
+        if (w <= 0 || h <= 0) return
+        sweep = SweepGradient(
+            w / 2f, h / 2f,
+            intArrayOf(Pal.ACC1, Pal.ACC2, lightenC(Pal.ACC2, 0.55f), Pal.ACC2, Pal.ACC1),
+            floatArrayOf(0f, 0.3f, 0.5f, 0.75f, 1f)
+        )
+        mask = buildMask(w, h)
+        dst.set(0f, 0f, w.toFloat(), h.toFloat())
+    }
+
+    /** Small alpha-only picture: strongest right at the screen edge, melting away ~35dp inwards. */
+    private fun buildMask(w: Int, h: Int): Bitmap? {
+        return try {
+            val sc = 0.3f
+            val d = context.resources.displayMetrics.density
+            val bw = max(8, (w * sc).toInt())
+            val bh = max(8, (h * sc).toInt())
+            val bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ALPHA_8)
+            val p = Paint(Paint.ANTI_ALIAS_FLAG)
+            p.style = Paint.Style.STROKE
+            p.color = Color.BLACK
+            p.strokeWidth = 26f * d * sc
+            p.maskFilter = BlurMaskFilter(22f * d * sc, BlurMaskFilter.Blur.NORMAL)
+            val r = 34f * d * sc
+            Canvas(bmp).drawRoundRect(RectF(0f, 0f, bw.toFloat(), bh.toFloat()), r, r, p)
+            bmp
+        } catch (e: Throwable) {
+            null
+        }
     }
 
     override fun onDraw(c: Canvas) {
+        val bm = mask ?: return
+        val s = sweep ?: return
         val now = SystemClock.uptimeMillis()
-        val age = (now - flashAt) / 700f
-        val fl = if (age < 1f) (1f - age) * 1.1f else 0f
-        val pulse = 0.5f + 0.12f * sin(now / 380f)
-        val a = min(255f, (fl + pulse) * 170f).toInt()
-        val l = context.dp(20).toFloat()
-        rf.set(l, context.dp(14).toFloat(), width - l, height - context.dp(24).toFloat())
-        p.shader = shader
-        p.alpha = a
-        val r = min(context.dp(34).toFloat(), rf.height() / 2f)
-        c.drawRoundRect(rf, r, r, p)
-        postInvalidateDelayed(33)
+        val tIn = ((now - bornAt) / 420f).coerceIn(0f, 1f)
+        val inK = tIn * tIn * (3f - 2f * tIn)
+        val outK = if (closeAt == 0L) 1f else 1f - ((now - closeAt) / 240f).coerceIn(0f, 1f)
+        val flashAge = (now - flashAt) / 700f
+        val fl = if (flashAt != 0L && flashAge < 1f) 1f - flashAge else 0f
+        val pulse = 0.82f + 0.18f * sin(now / 420f)
+        val k = (inK * outK * pulse * (1f + 0.45f * fl)).coerceIn(0f, 1f)
+
+        val w = width.toFloat()
+        val h = height.toFloat()
+        m.setRotate((now % 6000L) / 6000f * 360f, w / 2f, h / 2f)
+        s.setLocalMatrix(m)
+        fill.shader = s
+        val sc = c.saveLayerAlpha(0f, 0f, w, h, (255f * k).toInt())
+        c.drawRect(0f, 0f, w, h, fill)
+        c.drawBitmap(bm, null, dst, maskPaint)
+        c.restoreToCount(sc)
+        if (outK > 0f) postInvalidateOnAnimation()
     }
 }
 
@@ -143,12 +202,13 @@ class Popup(private val ctx: Context) {
         val desc: String, val extra: String, val pct: Int, val expandable: Boolean, val ms: Long
     )
 
-    private class Pop(val root: FrameLayout, val glass: LinearLayout, val expandBox: View?, val glow: GlowView)
+    private class Pop(val root: FrameLayout, val glass: LinearLayout, val expandBox: View?)
 
     private val ui = Handler(Looper.getMainLooper())
     private val queue = LinkedList<Data>()
     private var showing = false
     private var current: View? = null
+    private var currentEdge: EdgeGlowView? = null
     private var pendingDismiss: Runnable? = null
 
     private fun wm(): WindowManager = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -156,6 +216,45 @@ class Popup(private val ctx: Context) {
     private fun secs(): Long = (ctx.prefs().getInt("popup_secs", 5)) * 1000L
 
     private fun fmt(n: Int): String = String.format("%,d", n)
+
+    /** Full-screen, touch-through window for the edge glow. Alpha stays <= 0.8 so Android 12+ lets touches reach the game. */
+    private fun edgeParams(): WindowManager.LayoutParams {
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        )
+        lp.gravity = Gravity.TOP or Gravity.START
+        lp.alpha = 0.78f
+        if (Build.VERSION.SDK_INT >= 28) {
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        return lp
+    }
+
+    private fun addEdge(): EdgeGlowView? {
+        return try {
+            val e = EdgeGlowView(ctx)
+            wm().addView(e, edgeParams())
+            currentEdge = e
+            e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun removeEdge(e: View?) {
+        if (e == null) return
+        try {
+            wm().removeView(e)
+        } catch (_: Exception) {
+        }
+        if (currentEdge === e) currentEdge = null
+    }
 
     fun hide() {
         ui.post {
@@ -170,6 +269,7 @@ class Popup(private val ctx: Context) {
                 }
             }
             current = null
+            removeEdge(currentEdge)
         }
     }
 
@@ -226,6 +326,8 @@ class Popup(private val ctx: Context) {
             Fonts.load(ctx)
             val top = (ctx.prefs().getString("popup_pos", "top") ?: "top") != "bottom"
             val pop = build(d, bmp, top)
+            // edge glow goes in first so the popup window sits above it
+            val edge = addEdge()
             val lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -247,12 +349,12 @@ class Popup(private val ctx: Context) {
             v.translationY = off
             v.animate().alpha(1f).scaleX(1f).scaleY(1f).translationY(0f)
                 .setDuration(520).setInterpolator(OvershootInterpolator(1.8f)).start()
-            pop.glow.flash()
+            edge?.flash()
 
             var expanded = false
             val schedule = { ms: Long ->
                 pendingDismiss?.let { ui.removeCallbacks(it) }
-                val r = Runnable { dismiss(v, off) }
+                val r = Runnable { dismiss(v, off, edge) }
                 pendingDismiss = r
                 ui.postDelayed(r, ms)
             }
@@ -260,7 +362,7 @@ class Popup(private val ctx: Context) {
             v.setOnClickListener {
                 if (!d.expandable || expanded) {
                     pendingDismiss?.let { ui.removeCallbacks(it) }
-                    dismiss(v, off)
+                    dismiss(v, off, edge)
                 } else {
                     expanded = true
                     val ts = TransitionSet()
@@ -271,24 +373,27 @@ class Popup(private val ctx: Context) {
                     TransitionManager.beginDelayedTransition(pop.root, ts)
                     pop.expandBox?.visibility = View.VISIBLE
                     (pop.glass as? GlassLinear)?.radiusDp = 30
-                    pop.glow.flash()
+                    edge?.flash()
                     schedule(d.ms + 3500L)
                 }
             }
         } catch (e: Exception) {
+            removeEdge(currentEdge)
             Toast.makeText(ctx, d.title, Toast.LENGTH_LONG).show()
             ui.postDelayed({ next() }, 400)
         }
     }
 
-    private fun dismiss(v: View, off: Float) {
+    private fun dismiss(v: View, off: Float, edge: EdgeGlowView?) {
         if (v.tag == "gone") return
         v.tag = "gone"
+        edge?.fadeOut()
         v.animate().alpha(0f).scaleX(0.9f).scaleY(0.9f).translationY(off * 0.5f).setDuration(240).withEndAction {
             try {
                 wm().removeView(v)
             } catch (_: Exception) {
             }
+            removeEdge(edge)
             if (current === v) current = null
             ui.postDelayed({ next() }, 260)
         }.start()
@@ -314,8 +419,6 @@ class Popup(private val ctx: Context) {
         root.setPadding(ctx.dp(20), ctx.dp(14), ctx.dp(20), ctx.dp(24))
         root.clipChildren = false
         root.clipToPadding = false
-        val glow = GlowView(ctx)
-        root.addView(glow, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
         val glass: LinearLayout
         if (solid) {
@@ -415,6 +518,6 @@ class Popup(private val ctx: Context) {
             glass.addView(ex)
             expandBox = ex
         }
-        return Pop(root, glass, expandBox, glow)
+        return Pop(root, glass, expandBox)
     }
 }

@@ -7,7 +7,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.RadialGradient
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.SweepGradient
 import android.os.SystemClock
 import android.text.InputType
@@ -176,6 +178,55 @@ fun Context.sectionTitle(text: String): TextView {
 fun shortConsole(c: String): String {
     val s = c.replace("Nintendo ", "").replace("PlayStation Portable", "PSP").replace("PlayStation", "PS")
     return if (s.isEmpty()) "DS" else s
+}
+
+/**
+ * Backdrop behind the bottom bar: a wide radial gradient anchored at the bottom edge, white in the light
+ * theme and black in the dark theme, solid where the bar sits and fading away towards the top so cards
+ * scrolling underneath never show through the bar.
+ *
+ * It only paints; it reports a size of 0 until it is measured EXACTLY, so placing it in a wrap-content
+ * parent (with negative margins to overhang the bar) can never make that parent grow.
+ */
+class BottomScrimView(ctx: Context) : View(ctx) {
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val m = Matrix()
+    private var shader: RadialGradient? = null
+
+    init {
+        isClickable = false
+        isFocusable = false
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val w = if (View.MeasureSpec.getMode(widthMeasureSpec) == View.MeasureSpec.EXACTLY) View.MeasureSpec.getSize(widthMeasureSpec) else 0
+        val h = if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.EXACTLY) View.MeasureSpec.getSize(heightMeasureSpec) else 0
+        setMeasuredDimension(w, h)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        super.onSizeChanged(w, h, ow, oh)
+        if (w <= 0 || h <= 0) return
+        val base = if (Pal.light) 0xFFFFFF else 0x000000
+        // unit-radius gradient, stretched into a wide ellipse whose centre is the bottom middle of the view
+        val s = RadialGradient(
+            0f, 0f, 1f,
+            intArrayOf(base or (0xF4 shl 24), base or (0xE6 shl 24), base or (0x8C shl 24), base),
+            floatArrayOf(0f, 0.34f, 0.68f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        m.reset()
+        m.setScale(w * 0.95f, h.toFloat())
+        m.postTranslate(w / 2f, h.toFloat())
+        s.setLocalMatrix(m)
+        shader = s
+    }
+
+    override fun onDraw(c: Canvas) {
+        val s = shader ?: return
+        p.shader = s
+        c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), p)
+    }
 }
 
 /** Moving gradient highlight that glides to whatever is focused with the D-pad / controller. */
