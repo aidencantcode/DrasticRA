@@ -95,7 +95,7 @@ class AnimBg(ctx: Context) : View(ctx) {
         if (sp.getBoolean("bg_link", true)) {
             c1 = Pal.ACC1
             c2 = Pal.ACC2
-            c3 = Color.rgb(
+            c3 = if (Pal.acc3On) Pal.ACC3 else Color.rgb(
                 (Color.red(Pal.ACC1) + Color.red(Pal.ACC2)) / 2,
                 (Color.green(Pal.ACC1) + Color.green(Pal.ACC2)) / 2,
                 (Color.blue(Pal.ACC1) + Color.blue(Pal.ACC2)) / 2

@@ -158,6 +158,10 @@ class GlassLinear(ctx: Context, modeOverride: String? = null) : LinearLayout(ctx
     var frostTop = Pal.CARD_T
     var frostBottom = Pal.CARD_B
     var provider: ((Canvas, View) -> Unit)? = null
+    /** which foil switch applies: "ui", "popup", "overlay" or "preview" */
+    var foilSurface = "ui"
+    private var foil: FoilPainter? = null
+    private var foilNext = 0L
 
     private val mode: String = modeOverride ?: ctx.glassMode()
     private val path = Path()
@@ -232,7 +236,7 @@ class GlassLinear(ctx: Context, modeOverride: String? = null) : LinearLayout(ctx
         bandMask = LinearGradient(0f, h * 0.40f, 0f, h, 0x00000000, 0xC0000000.toInt(), Shader.TileMode.CLAMP)
         bandColor = LinearGradient(
             0f, 0f, w * 1.2f, 0f,
-            intArrayOf(Pal.ACC1, Pal.ACC2, Pal.ACC1), floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.MIRROR
+            intArrayOf(*Pal.grad(), Pal.ACC1), null, Shader.TileMode.MIRROR
         )
     }
 
@@ -288,6 +292,17 @@ class GlassLinear(ctx: Context, modeOverride: String? = null) : LinearLayout(ctx
         p.shader = glareShader
         c.drawRect(rect, p)
         p.shader = null
+        // holographic foil: on top of the glass (not blurred or bent by it), under the text
+        if (Foil.enabledFor(foilSurface)) {
+            val fp = foil ?: FoilPainter().also { foil = it }
+            fp.draw(c, this, rect)
+            // ~30 fps is plenty for a shimmer and keeps long lists light
+            val now = SystemClock.uptimeMillis()
+            if (now >= foilNext) {
+                foilNext = now + 32
+                postInvalidateDelayed(32)
+            }
+        }
         c.restore()
         q.style = Paint.Style.STROKE
         q.strokeWidth = strokeW

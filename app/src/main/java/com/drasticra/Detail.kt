@@ -61,6 +61,8 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
 
         sv.isVerticalScrollBarEnabled = false
         sv.isFocusable = false
+        // no stretch overscroll: it clips the rows that overhang the faded header into a hard square
+        sv.overScrollMode = View.OVER_SCROLL_NEVER
         sv.clipToPadding = false
         // like the home screen, rows slide up over the (fading) header instead of being cut off under it
         sv.clipChildren = false
@@ -107,29 +109,45 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
         renderList()
     }
 
+    /** achievements of this game unlocked offline and not sent yet (shown with a yellow tint) */
+    private var pending: Set<Int> = emptySet()
+
     private fun load() {
         val u = act.apiUser()
         val k = act.apiKey()
-        if (u.isEmpty() || k.isEmpty()) {
-            list.removeAllViews()
-            list.addView(act.tv("Add your Web API key in Settings -> Account to see achievement lists.", 14f, Pal.SUB))
-            return
-        }
         Thread {
-            try {
-                val d = Ra.parseGame(Ra.gameText(u, k, game.id))
-                act.runOnUiThread {
-                    detail = d
-                    renderHeader()
-                    // focus the filter chips once there is something to pick (unless the user already moved on)
-                    renderChips(backBtn.isFocused)
-                    renderList()
+            pending = OfflineProxy.pendingIds(game.id)
+            var d: RaGameDetail? = null
+            var err = ""
+            if (u.isNotEmpty() && k.isNotEmpty()) {
+                try {
+                    d = Ra.parseGame(Ra.gameTextCached(u, k, game.id))
+                } catch (e: Exception) {
+                    err = e.message ?: "network error"
                 }
-            } catch (e: Exception) {
-                act.runOnUiThread {
+            }
+            // offline and never opened online: build the list from the Offline Play cache
+            if (d == null) d = OfflineProxy.detailFromCache(game.id)
+            val res = d
+            act.runOnUiThread {
+                if (res == null) {
                     list.removeAllViews()
-                    list.addView(act.tv("Could not load this game: " + e.message, 14f, Pal.SUB))
+                    list.addView(act.tv(
+                        if (u.isEmpty() || k.isEmpty()) "Add your Web API key in Settings -> Account to see achievement lists."
+                        else "Could not load this game: $err", 14f, Pal.SUB))
+                    return@runOnUiThread
                 }
+                // offline unlocks count as earned here (they are, just not on the site yet)
+                detail = if (pending.isEmpty()) res else RaGameDetail(res.id, res.title, res.icon, res.console, res.total,
+                    res.list.count { it.earned || pending.contains(it.id) },
+                    res.list.map {
+                        if (!it.earned && pending.contains(it.id)) RaAchDetail(it.id, it.title, it.desc, it.points, it.badge,
+                            true, "", it.order) else it
+                    })
+                renderHeader()
+                // focus the filter chips once there is something to pick (unless the user already moved on)
+                renderChips(backBtn.isFocused)
+                renderList()
             }
         }.start()
     }
@@ -210,7 +228,14 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
         d.ellipsize = TextUtils.TruncateAt.END
         col.addView(t)
         col.addView(d, act.ll(WRAP, WRAP, t = 2))
-        val status = if (a.earned) {
+        val isPending = pending.contains(a.id)
+        if (isPending) {
+            // yellow tint: unlocked while offline, waiting to be sent
+            c.foreground = act.rounded(0x38FFC21A, 22)
+        }
+        val status = if (isPending) {
+            act.tv("Unlocked offline  -  not synced yet, waiting for internet", 11f, 0xFFE0A100.toInt(), true)
+        } else if (a.earned) {
             act.tv("Unlocked" + (if (a.date.length >= 10) "   " + a.date.substring(0, 10) else ""), 11f, Pal.ACC1, true)
         } else {
             act.tv("Locked", 11f, Pal.SUB, true)

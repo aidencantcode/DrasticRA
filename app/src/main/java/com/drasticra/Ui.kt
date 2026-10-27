@@ -51,6 +51,9 @@ object Pal {
     var PANEL = 0
     var ACC1 = 0xFF7C7CFF.toInt()
     var ACC2 = 0xFFB57CFF.toInt()
+    /** third accent colour, only used when the accent is set to a 3 colour gradient ([acc3On]) */
+    var ACC3 = 0xFF5BC8FF.toInt()
+    var acc3On = false
     val GOOD = 0xFF4ADE80.toInt()
     val GOLD1 = 0xFFFFD36B.toInt()
     val GOLD2 = 0xFFF2B33D.toInt()
@@ -60,6 +63,8 @@ object Pal {
         light = (p.getString("theme", "light") ?: "light") == "light"
         ACC1 = p.getInt("acc1", 0xFF7C7CFF.toInt())
         ACC2 = p.getInt("acc2", 0xFFB57CFF.toInt())
+        ACC3 = p.getInt("acc3", 0xFF5BC8FF.toInt())
+        acc3On = p.getInt("acc_n", 2) == 3
         if (light) {
             BG = 0xFFEDEEF5.toInt()
             CARD_T = 0xF2FFFFFF.toInt()
@@ -82,6 +87,19 @@ object Pal {
             PANEL = 0xFF14161D.toInt()
         }
     }
+
+    /** The accent gradient stops: 2 or 3 colours depending on the Appearance setting. */
+    fun grad(): IntArray = if (acc3On) intArrayOf(ACC1, ACC2, ACC3) else intArrayOf(ACC1, ACC2)
+
+    /** Closed loop of the accent for sweep gradients (glows, rings) so the seam never shows. */
+    fun loop(): IntArray = if (acc3On) intArrayOf(ACC1, ACC2, ACC3, ACC1)
+    else intArrayOf(ACC1, ACC2, mix(ACC2, 0xFFFFFFFF.toInt(), 0.55f), ACC2, ACC1)
+
+    fun mix(a: Int, b: Int, t: Float): Int = android.graphics.Color.rgb(
+        (android.graphics.Color.red(a) + (android.graphics.Color.red(b) - android.graphics.Color.red(a)) * t).toInt(),
+        (android.graphics.Color.green(a) + (android.graphics.Color.green(b) - android.graphics.Color.green(a)) * t).toInt(),
+        (android.graphics.Color.blue(a) + (android.graphics.Color.blue(b) - android.graphics.Color.blue(a)) * t).toInt()
+    )
 }
 
 object Fonts {
@@ -114,7 +132,7 @@ fun Context.rounded(color: Int, radiusDp: Int): GradientDrawable {
 }
 
 fun Context.accentFill(radiusDp: Int): GradientDrawable {
-    val g = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Pal.ACC1, Pal.ACC2))
+    val g = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, Pal.grad())
     g.cornerRadius = dp(radiusDp).toFloat()
     return g
 }

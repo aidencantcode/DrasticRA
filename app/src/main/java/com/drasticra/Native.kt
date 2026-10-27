@@ -21,5 +21,7 @@ object Native {
     external fun unload()
     /** UTF-8 list of every core achievement with live progress (see dsra_jni.cpp for the layout). */
     external fun achievementList(): ByteArray?
+    /** RetroAchievements hash of a .nds file (empty on failure). Safe from any thread. */
+    external fun hashFile(path: String): String
     external fun shutdown()
 }

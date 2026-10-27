@@ -124,8 +124,8 @@ class BadgeFrame(ctx: Context, iconUrl: String?) : FrameLayout(ctx) {
         if (s == null) {
             s = SweepGradient(
                 0f, 0f,
-                intArrayOf(Pal.ACC1, Pal.ACC2, mixC(Pal.ACC2, Color.WHITE, 0.55f), Pal.ACC2, Pal.ACC1),
-                floatArrayOf(0f, 0.3f, 0.5f, 0.75f, 1f)
+                Pal.loop(),
+                null
             )
             sweep = s
         }

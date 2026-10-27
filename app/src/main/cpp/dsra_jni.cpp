@@ -12,6 +12,7 @@
 
 #include "rc_client.h"
 #include "rc_consoles.h"
+#include "rc_hash.h"
 
 #define SEP "\037"
 
@@ -358,6 +359,21 @@ JNIEXPORT jbyteArray JNICALL Java_com_drasticra_Native_achievementList(JNIEnv* e
     jbyteArray arr = env->NewByteArray((jsize)out.size());
     if (arr && !out.empty()) env->SetByteArrayRegion(arr, 0, (jsize)out.size(), (const jbyte*)out.data());
     return arr;
+}
+
+/* RetroAchievements hash of a ROM file, computed exactly like rc_client does when it identifies a game.
+ * Independent of the client, so the Offline Play cacher can call it from its own threads. */
+JNIEXPORT jstring JNICALL Java_com_drasticra_Native_hashFile(JNIEnv* env, jobject, jstring path) {
+    std::string p = str(env, path);
+    char hash[33];
+    memset(hash, 0, sizeof hash);
+    static std::mutex hash_mu; /* the hash library sets up its file reader lazily: keep it one at a time */
+    int ok;
+    {
+        std::lock_guard<std::mutex> l(hash_mu);
+        ok = rc_hash_generate_from_file(hash, RC_CONSOLE_NINTENDO_DS, p.c_str());
+    }
+    return env->NewStringUTF(ok ? hash : "");
 }
 
 JNIEXPORT void JNICALL Java_com_drasticra_Native_unload(JNIEnv*, jobject) {

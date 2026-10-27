@@ -13,6 +13,9 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
@@ -38,6 +41,8 @@ import java.util.Locale
 
 class MainActivity : Activity() {
     companion object {
+        /** true while the app is on screen (the engine then leaves online / offline notices to the app) */
+        @Volatile var foreground = false
         /** true once the app has fully started in this process (later re-creates only show a short veil) */
         @Volatile var warmedOnce = false
     }
@@ -82,9 +87,11 @@ class MainActivity : Activity() {
     private var earnedAll: List<RaAch>? = null
     private var completion: List<RaGame>? = null
     private var detail: GameDetailView? = null
-    private var congrats: CongratsView? = null
+    private var congrats: CaughtView? = null
     /** what had the controller highlight on the home screen before the drawer / a game page took over */
     private var lastMainFocus: View? = null
+    /** set by the Button mapping page while it records a combo: gets every key event first */
+    internal var keyRecorder: ((KeyEvent) -> Boolean)? = null
 
     // ---------- system ui ----------
     @Suppress("DEPRECATION")
@@ -114,13 +121,18 @@ class MainActivity : Activity() {
         Pal.load(this)
         Fonts.load(this)
         Img.init(this)
+        Hotkeys.load(this)
+        Foil.load(this)
+        NetMonitor.init(this)
+        OfflineStore.init(this)
+        Ra.cacheDir = java.io.File(filesDir, "webcache").also { it.mkdirs() }
         if (Build.VERSION.SDK_INT >= 28) {
             val wlp = window.attributes
             wlp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             window.attributes = wlp
         }
         grid = prefs.getBoolean("grid", true)
-        tab = prefs.getInt("tab", 0)
+        tab = prefs.getInt("tab2", 0).coerceIn(0, 3)
 
         root = FrameLayout(this)
         root.setBackgroundColor(Pal.BG)
@@ -151,6 +163,9 @@ class MainActivity : Activity() {
         contentScroll.isVerticalScrollBarEnabled = false
         // the scroll view itself must never take the highlight (it would outline the whole list)
         contentScroll.isFocusable = false
+        // Android 12+ "stretch" overscroll redraws the list clipped to its own box, which chopped the cards that
+        // slide up over the faded header into a hard square at the end of the page - so no overscroll effect
+        contentScroll.overScrollMode = View.OVER_SCROLL_NEVER
         content = LinearLayout(this)
         content.orientation = LinearLayout.VERTICAL
         content.clipChildren = false
@@ -177,6 +192,9 @@ class MainActivity : Activity() {
         buildDrawer(savedInstanceState)
 
         halo = FocusHalo(this)
+        // above the settings drawer (elevation 16): siblings with a higher elevation are drawn on top whatever the
+        // child order is, which is why the highlight vanished behind the settings panel
+        halo.elevation = dp(40).toFloat()
         root.addView(halo, FrameLayout.LayoutParams(MATCH, MATCH))
         root.viewTreeObserver.addOnGlobalFocusChangeListener { _, n ->
             // safety net: while the drawer is closed nothing inside it may hold focus (it sits off screen)
@@ -208,10 +226,17 @@ class MainActivity : Activity() {
         } else {
             val cold = !warmedOnce
             val loader = LoadingView(this, cold)
+            loader.elevation = dp(60).toFloat()
+            loader.outlineProvider = null
             root.addView(loader, FrameLayout.LayoutParams(MATCH, MATCH))
+            // glass loading screen: the real background and home screen show through it, blurred
+            loader.blurBehind(bg, mainLayer)
             val gate = LoadingGate(loader, if (cold) 2200L else 450L) {
                 warmedOnce = true
                 first?.requestFocus()
+                if (!NetMonitor.online) {
+                    showNotice("No internet running offline mode!", "Achievements still unlock - they are sent when you are back online", true)
+                }
             }
             prewarmGlass { gate.warmReady() }
             loadCaches { gate.dataReady() }
@@ -278,6 +303,9 @@ class MainActivity : Activity() {
         avatarTop.background = rounded(Pal.FIELD, 23)
         avatarTop.clipCircle()
         avatarTop.elevation = dp(5).toFloat()
+        avatarTop.isClickable = true
+        avatarTop.setOnClickListener { avatarEgg() }
+        avatarTop.pressable()
         row.addView(avatarTop, ll(dp(46), dp(46)))
         return row
     }
@@ -294,20 +322,33 @@ class MainActivity : Activity() {
         pad(profilePill, 8, 6, 14, 6)
         row.addView(profilePill, ll(WRAP, WRAP, r = 10))
 
-        val names = arrayOf("Recent", "Earned", "Completion")
+        val names = arrayOf("Recent", "Recently earned", "Earned", "Completion")
         tabViews.clear()
+        // four tabs: they scroll sideways on narrow screens instead of squashing the row
+        val tabScroll = android.widget.HorizontalScrollView(this)
+        tabScroll.isHorizontalScrollBarEnabled = false
+        tabScroll.isFocusable = false
+        tabScroll.clipChildren = false
+        tabScroll.clipToPadding = false
+        tabScroll.overScrollMode = View.OVER_SCROLL_NEVER
+        val tabRow = LinearLayout(this)
+        tabRow.orientation = LinearLayout.HORIZONTAL
+        tabRow.clipChildren = false
+        pad(tabRow, 4, 4, 4, 4)
         for (i in names.indices) {
             val t = tv(names[i], 15f, Pal.SUB, true)
             t.gravity = Gravity.CENTER
-            pad(t, 16, 9, 16, 9)
+            pad(t, 14, 9, 14, 9)
+            t.maxLines = 1
             t.isClickable = true
             makeFocusable(t)
             t.setOnClickListener { selectTab(i) }
             t.pressable()
             tabViews.add(t)
-            row.addView(t, ll(WRAP, WRAP, r = 6))
+            tabRow.addView(t, ll(WRAP, WRAP, r = 6))
         }
-        row.addView(View(this), ll(0, 1, 1f))
+        tabScroll.addView(tabRow)
+        row.addView(tabScroll, ll(0, WRAP, 1f, r = 8))
 
         val toggle = LinearLayout(this)
         toggle.orientation = LinearLayout.HORIZONTAL
@@ -432,11 +473,17 @@ class MainActivity : Activity() {
 
     private fun selectTab(i: Int) {
         tab = (i + tabViews.size) % tabViews.size
-        prefs.edit().putInt("tab", tab).apply()
+        prefs.edit().putInt("tab2", tab).apply()
         styleTabs()
-        renderTab()
-        if (tab == 1 && earnedAll == null) fetchEarned()
-        if (tab == 2 && completion == null) fetchCompletion()
+        // put the spinner up straight away, then build the list on the next frame so the switch never feels stuck
+        val gen = ++renderGen
+        val hadCard = currentFocus?.let { isInside(it, content) } == true
+        content.removeAllViews()
+        content.addView(spinnerCard("Loading..."), ll(MATCH, WRAP))
+        if (hadCard) tabViews.getOrNull(tab)?.requestFocus()
+        content.postOnAnimation { if (gen == renderGen) renderTab() }
+        if ((tab == 1 || tab == 2) && earnedAll == null) fetchEarned()
+        if (tab == 3 && completion == null) fetchCompletion()
     }
 
     // ---------- rendering ----------
@@ -463,6 +510,20 @@ class MainActivity : Activity() {
         }
     }
 
+    /** bumped on every render so batches still queued from an older render stop building */
+    private var renderGen = 0
+
+    /** A card with the round accent spinner and a line of text (loading states). */
+    private fun spinnerCard(msg: String): View {
+        val m = card(24)
+        m.orientation = LinearLayout.HORIZONTAL
+        m.gravity = Gravity.CENTER_VERTICAL
+        pad(m, 18, 16, 18, 16)
+        m.addView(SpinnerView(this), ll(dp(30), dp(30), r = 14))
+        m.addView(tv(msg, 14f, Pal.SUB), ll(0, WRAP, 1f))
+        return m
+    }
+
     internal fun renderTab() {
         // remember which card had the highlight, so a refresh does not throw it somewhere random
         val f = currentFocus
@@ -480,12 +541,15 @@ class MainActivity : Activity() {
                 }
             }
         }
+        val gen = ++renderGen
         content.removeAllViews()
         // a new list may clamp the scroll position, so re-check the header once it has been laid out
         contentScroll.post { updateHeaderFade(contentScroll.scrollY) }
         val dsOnly = prefs.getBoolean("ds_only", false)
-        val cards = ArrayList<View>()
+        // card builders: views are created in small batches so long lists (Earned can hold thousands) never freeze
+        val makers = ArrayList<() -> View>()
         var emptyMsg = "Nothing here yet."
+        var loading = false
         when (tab) {
             0 -> {
                 val h = home
@@ -493,61 +557,112 @@ class MainActivity : Activity() {
                     emptyMsg = "Log in and add your Web API key in Settings (menu button) to see your games."
                 } else {
                     // Recent is always Nintendo DS only (Earned and Completion keep the Library filter)
-                    for (g in h.recent) if (isDsConsole(g.console)) cards.add(gameCard(g, true))
-                    if (cards.isEmpty()) emptyMsg = "No Nintendo DS games in your recent list yet."
+                    for (g in h.recent) if (isDsConsole(g.console)) makers.add { gameCard(g, true) }
+                    if (makers.isEmpty()) emptyMsg = "No Nintendo DS games in your recent list yet."
                     playSig = computePlaySig()
                 }
             }
             1 -> {
+                // Recently earned: Nintendo DS only, newest first, offline unlocks waiting to sync on top
+                for (pu in OfflineProxy.pending()) makers.add { achCard(pendingAch(pu), true) }
                 val e = earnedAll
                 if (e == null) {
-                    emptyMsg = "Loading your achievements..."
+                    loading = haveCreds() && makers.isEmpty()
+                    emptyMsg = if (loading) "Loading your recent unlocks..." else "Add your Web API key in Settings -> Account."
                 } else {
-                    for (a in e) if (!dsOnly || a.console.contains("DS")) cards.add(achCard(a))
+                    var n = 0
+                    for (a in e) if (isDsConsole(a.console) && n < 100) {
+                        makers.add { achCard(a) }
+                        n++
+                    }
+                    if (makers.isEmpty()) emptyMsg = "No Nintendo DS achievements earned recently."
+                }
+            }
+            2 -> {
+                for (pu in OfflineProxy.pending()) makers.add { achCard(pendingAch(pu), true) }
+                val e = earnedAll
+                if (e == null) {
+                    loading = haveCreds() && makers.isEmpty()
+                    emptyMsg = if (loading) "Loading your achievements..." else "Add your Web API key in Settings -> Account."
+                } else {
+                    for (a in e) if (!dsOnly || a.console.contains("DS")) makers.add { achCard(a) }
                 }
             }
             else -> {
                 val c = completion
                 if (c == null) {
-                    emptyMsg = "Loading your completion progress..."
+                    loading = haveCreds()
+                    emptyMsg = if (loading) "Loading your completion progress..." else "Add your Web API key in Settings -> Account."
                 } else {
-                    for (g in c) if (!dsOnly || g.console.contains("DS")) cards.add(gameCard(g))
+                    for (g in c) if (!dsOnly || g.console.contains("DS")) makers.add { gameCard(g) }
                 }
             }
         }
-        if (cards.isEmpty()) {
-            val m = card(24)
-            pad(m, 18, 16, 18, 16)
-            m.addView(tv(emptyMsg, 14f, Pal.SUB))
+        if (makers.isEmpty()) {
+            val m: View = if (loading) spinnerCard(emptyMsg) else {
+                val c = card(24)
+                pad(c, 18, 16, 18, 16)
+                c.addView(tv(emptyMsg, 14f, Pal.SUB))
+                c
+            }
             content.addView(m, ll(MATCH, WRAP))
             m.popIn(0)
             if (focusIdx >= 0) tabViews.getOrNull(tab)?.requestFocus()
             return
         }
         val cols = if (grid && resources.configuration.screenWidthDp >= 560) 2 else 1
-        var i = 0
-        var n = 0
-        while (i < cards.size) {
-            val row = LinearLayout(this)
-            row.orientation = LinearLayout.HORIZONTAL
-            row.clipChildren = false
-            for (c in 0 until cols) {
-                if (i + c < cards.size) {
-                    row.addView(cards[i + c], ll(0, WRAP, 1f, l = if (c == 0) 0 else 12))
-                    cards[i + c].popIn(minOf(n, 10) * 45L)
-                    n++
-                } else {
-                    row.addView(View(this), ll(0, 1, 1f, l = 12))
+        val built = ArrayList<View>()
+        var tail: View? = null
+        var focused = focusIdx < 0
+        val step = object : Runnable {
+            var i = 0
+            override fun run() {
+                if (gen != renderGen) return
+                tail?.let { content.removeView(it) }
+                tail = null
+                // first screenful right away, then a few rows per frame
+                val rows = if (i == 0) 6 else 4
+                var r = 0
+                while (r < rows && i < makers.size) {
+                    val row = LinearLayout(this@MainActivity)
+                    row.orientation = LinearLayout.HORIZONTAL
+                    row.clipChildren = false
+                    for (c in 0 until cols) {
+                        if (i + c < makers.size) {
+                            val v = makers[i + c]()
+                            row.addView(v, ll(0, WRAP, 1f, l = if (c == 0) 0 else 12))
+                            if (built.size < 10) v.popIn(built.size * 45L)
+                            built.add(v)
+                        } else {
+                            row.addView(View(this@MainActivity), ll(0, 1, 1f, l = 12))
+                        }
+                    }
+                    content.addView(row, ll(MATCH, WRAP, t = if (i == 0) 0 else 12))
+                    i += cols
+                    r++
                 }
+                if (!focused && focusIdx < built.size) {
+                    focused = true
+                    val target = built[focusIdx]
+                    target.post { if (!drawerOpen && detail == null) target.requestFocus() }
+                }
+                if (i < makers.size) {
+                    // small spinner at the end of the list while the rest is still being added
+                    val sp = LinearLayout(this@MainActivity)
+                    sp.gravity = Gravity.CENTER
+                    sp.addView(SpinnerView(this@MainActivity), ll(dp(26), dp(26)))
+                    content.addView(sp, ll(MATCH, WRAP, t = 14))
+                    tail = sp
+                    content.postOnAnimation(this)
+                } else if (!focused && built.isNotEmpty()) {
+                    focused = true
+                    val target = built.last()
+                    target.post { if (!drawerOpen && detail == null) target.requestFocus() }
+                }
+                GlassBackdrop.invalidateAll()
             }
-            content.addView(row, ll(MATCH, WRAP, t = if (i == 0) 0 else 12))
-            i += cols
         }
-        if (focusIdx >= 0) {
-            val target = cards[minOf(focusIdx, cards.size - 1)]
-            target.post { if (!drawerOpen && detail == null) target.requestFocus() }
-        }
-        GlassBackdrop.invalidateAll()
+        step.run()
     }
 
     /** Sum of tracked play minutes over the games on the Recent tab, so we know when its cards are out of date. */
@@ -620,7 +735,13 @@ class MainActivity : Activity() {
         return c
     }
 
-    private fun achCard(a: RaAch): View {
+    /** An offline unlock that is not on the site yet, shown like an earned achievement. */
+    private fun pendingAch(p: PendingUnlock): RaAch = RaAch(
+        p.title, p.desc, p.points, p.badge, p.game.ifEmpty { "Offline play" }, p.gameIcon, "Nintendo DS",
+        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(p.at * 1000L)), p.gameId
+    )
+
+    private fun achCard(a: RaAch, pending: Boolean = false): View {
         val c = card(22)
         c.orientation = LinearLayout.HORIZONTAL
         c.gravity = Gravity.CENTER_VERTICAL
@@ -645,6 +766,12 @@ class MainActivity : Activity() {
         pad(pts, 11, 4, 11, 4)
         pts.background = accentFill(14)
         c.addView(pts, ll(WRAP, WRAP))
+        if (pending) {
+            // yellow tint + note: unlocked offline, waiting for internet to reach RetroAchievements
+            c.foreground = rounded(0x38FFC21A, 22)
+            meta.text = "Not synced yet  -  waiting for internet"
+            meta.setTextColor(0xFFE0A100.toInt())
+        }
         c.isClickable = true
         makeFocusable(c)
         c.setOnClickListener {
@@ -676,13 +803,258 @@ class MainActivity : Activity() {
 
     internal fun showCongrats(items: List<UnseenItem>) {
         if (items.isEmpty() || congrats != null) return
-        val v = CongratsView(this, items) {
+        val v = CaughtView(this, items) {
             congrats?.let { root.removeView(it) }
             congrats = null
         }
         congrats = v
+        v.elevation = dp(50).toFloat()
+        v.outlineProvider = null
         root.addView(v, FrameLayout.LayoutParams(MATCH, MATCH))
         v.start()
+    }
+
+    // ---------- notices / edge glow ----------
+    private var noticeGlow: EdgeGlowView? = null
+    private var noticeCard: View? = null
+
+    /** Edge glow inside the app; [colors] null = the Edge glow setting. Fades out after [holdMs]. */
+    internal fun showEdgeGlow(colors: IntArray?, holdMs: Long, positions: FloatArray? = null): EdgeGlowView {
+        val g = EdgeGlowView(this, root.width, root.height, colors, positions)
+        g.isClickable = false
+        g.isFocusable = false
+        g.alpha = 0.88f
+        g.elevation = dp(45).toFloat()
+        g.outlineProvider = null
+        root.addView(g, FrameLayout.LayoutParams(MATCH, MATCH))
+        g.flash()
+        g.calmAfter(holdMs / 2)
+        g.postDelayed({ g.fadeOut(900L) { root.removeView(g) } }, holdMs)
+        return g
+    }
+
+    /**
+     * Online / offline notice: a glass card sliding down from the top plus an edge glow - yellow with a warning
+     * when the internet is gone, your accent (Edge glow setting) when it is back.
+     */
+    internal fun showNotice(title: String, sub: String, warn: Boolean) {
+        if (!::root.isInitialized || root.width == 0) {
+            root.post { showNotice(title, sub, warn) }
+            return
+        }
+        noticeGlow?.let { old -> old.fadeOut(300L) { root.removeView(old) } }
+        noticeCard?.let { root.removeView(it) }
+        noticeGlow = showEdgeGlow(if (warn) NetNotice.YELLOW else null, 3600L)
+
+        val c = card(24)
+        c.orientation = LinearLayout.HORIZONTAL
+        c.gravity = Gravity.CENTER_VERTICAL
+        pad(c, 14, 12, 18, 12)
+        val badge = TextView(this)
+        badge.text = if (warn) "!" else "\u2713"
+        badge.gravity = Gravity.CENTER
+        badge.textSize = 20f
+        badge.typeface = Fonts.title
+        badge.setTextColor(if (warn) 0xFF3A2A00.toInt() else Color.WHITE)
+        badge.background = if (warn) {
+            val g = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFFFFE066.toInt(), 0xFFFFB020.toInt()))
+            g.shape = GradientDrawable.OVAL
+            g
+        } else {
+            val g = GradientDrawable(GradientDrawable.Orientation.TL_BR, Pal.grad())
+            g.shape = GradientDrawable.OVAL
+            g
+        }
+        c.addView(badge, ll(dp(40), dp(40), r = 12))
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        val l0 = tv(if (warn) "OFFLINE MODE" else "ONLINE MODE", 10f, if (warn) 0xFFE0A100.toInt() else Pal.ACC1, true)
+        l0.letterSpacing = 0.14f
+        col.addView(l0)
+        col.addView(tv(title, 15f, Pal.TEXT, true))
+        val st = tv(sub, 11f, Pal.SUB)
+        st.maxLines = 2
+        col.addView(st)
+        c.addView(col, ll(WRAP, WRAP))
+        c.elevation = dp(46).toFloat()
+        val lp = FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+        lp.topMargin = dp(14)
+        root.addView(c, lp)
+        noticeCard = c
+        c.alpha = 0f
+        c.translationY = -dp(60).toFloat()
+        c.animate().alpha(1f).translationY(0f).setDuration(460).setInterpolator(OvershootInterpolator(1.3f)).start()
+        c.setOnClickListener { hideNotice(c) }
+        c.postDelayed({ hideNotice(c) }, 4200L)
+    }
+
+    private fun hideNotice(c: View) {
+        if (c.tag == "gone") return
+        c.tag = "gone"
+        c.animate().alpha(0f).translationY(-dp(30).toFloat()).setDuration(420).withEndAction {
+            root.removeView(c)
+            if (noticeCard === c) noticeCard = null
+        }.start()
+    }
+
+    // ---------- Offline Play caching screen ----------
+    private var cacheModal: View? = null
+    private var cacheListener: ((RomCacher.Progress) -> Unit)? = null
+
+    /** Starts caching every ROM in [folder] and shows the progress screen (titles left, time left). */
+    internal fun startRomCache(folder: String, force: Boolean) {
+        if (!NetMonitor.online) {
+            showNotice("You are offline", "Caching needs internet - connect and try again", true)
+            return
+        }
+        if (!RomCacher.running) RomCacher.start(this, folder, force)
+        showCacheModal()
+    }
+
+    internal fun showCacheModal() {
+        if (cacheModal != null) return
+        val scrim = FrameLayout(this)
+        scrim.setBackgroundColor(0xA0000000.toInt())
+        scrim.isClickable = true
+        scrim.elevation = dp(47).toFloat()
+        val box = card(28)
+        pad(box, 22, 20, 22, 18)
+        box.addView(tv("CACHING FOR OFFLINE PLAY", 11f, Pal.ACC1, true).also { it.letterSpacing = 0.14f })
+        val head = LinearLayout(this)
+        head.orientation = LinearLayout.HORIZONTAL
+        head.gravity = Gravity.CENTER_VERTICAL
+        head.addView(SpinnerView(this), ll(dp(34), dp(34), r = 14))
+        val count = tv("Getting ready...", 20f, Pal.TEXT, true)
+        head.addView(count, ll(0, WRAP, 1f))
+        box.addView(head, ll(MATCH, WRAP, t = 10))
+        val barHolder = FrameLayout(this)
+        box.addView(barHolder, ll(MATCH, WRAP, t = 14))
+        val left = tv("", 13f, Pal.TEXT, true)
+        box.addView(left, ll(WRAP, WRAP, t = 10))
+        val cur = tv("", 12f, Pal.SUB)
+        cur.maxLines = 1
+        cur.ellipsize = TextUtils.TruncateAt.END
+        box.addView(cur, ll(MATCH, WRAP, t = 2))
+        val stats = tv("", 12f, Pal.SUB)
+        box.addView(stats, ll(WRAP, WRAP, t = 8))
+        val btn = pill("Stop", false) { RomCacher.cancel() }
+        box.addView(btn, ll(MATCH, WRAP, t = 16))
+        val blp = FrameLayout.LayoutParams(minOf(dp(460), resources.displayMetrics.widthPixels - dp(40)), WRAP, Gravity.CENTER)
+        scrim.addView(box, blp)
+        root.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
+        cacheModal = scrim
+        scrim.alpha = 0f
+        scrim.animate().alpha(1f).setDuration(220).start()
+        box.popIn(0)
+        btn.post { btn.requestFocus() }
+
+        fun fmtEta(ms: Long): String {
+            val sec = ms / 1000L
+            return if (sec >= 3600) "${sec / 3600}h ${(sec % 3600) / 60}m" else if (sec >= 60) "${sec / 60}m ${sec % 60}s" else "${sec}s"
+        }
+        val l: (RomCacher.Progress) -> Unit = { p ->
+            if (p.running) {
+                count.text = if (p.total == 0) "Looking for ROMs..." else "${p.done} / ${p.total} titles"
+                left.text = if (p.total == 0) "" else "${p.total - p.done} left" +
+                    (if (p.done > 0 && p.etaMs > 0) "   -   about ${fmtEta(p.etaMs)} to go" else "")
+                cur.text = p.current
+                stats.text = "Ready: ${p.cached}    No achievements: ${p.unsupported}    Failed: ${p.failed}"
+                barHolder.removeAllViews()
+                barHolder.addView(progressBar(if (p.total > 0) p.done * 100 / p.total else 0, 9, false),
+                    FrameLayout.LayoutParams(MATCH, WRAP))
+            } else {
+                count.text = "Finished"
+                left.text = p.message
+                cur.text = ""
+                barHolder.removeAllViews()
+                barHolder.addView(progressBar(100, 9, true), FrameLayout.LayoutParams(MATCH, WRAP))
+                btn.text = "Close"
+                btn.setOnClickListener { hideCacheModal() }
+                if (page == "offline") showPage("offline", false)
+            }
+        }
+        cacheListener = l
+        RomCacher.listeners.add(l)
+        RomCacher.progress?.let { l(it) }
+    }
+
+    private fun hideCacheModal() {
+        val m = cacheModal ?: return
+        cacheModal = null
+        cacheListener?.let { RomCacher.listeners.remove(it) }
+        cacheListener = null
+        m.animate().alpha(0f).setDuration(220).withEndAction { root.removeView(m) }.start()
+    }
+
+    // ---------- avatar easter egg ----------
+    private var eggLevel = 0
+    private var eggLast = 0L
+    private var eggGlow: EdgeGlowView? = null
+
+    /** Appearance -> highlight thickness changed: restyle the highlight without restarting. */
+    internal fun reloadHalo() = halo.loadStyle()
+
+    private fun buzz(effect: VibrationEffect) {
+        try {
+            val v: Vibrator = if (Build.VERSION.SDK_INT >= 31) {
+                getSystemService(VibratorManager::class.java).defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(VIBRATOR_SERVICE) as Vibrator
+            }
+            if (v.hasVibrator()) v.vibrate(effect)
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Level 1 = your accent, 2..5 = that many random colours spread around the wheel, 6 = full rainbow. */
+    private fun eggColors(level: Int): IntArray? {
+        if (level <= 1) return null
+        if (level >= 6) return intArrayOf(
+            0xFFFF3B3B.toInt(), 0xFFFF9F1C.toInt(), 0xFFFFE53B.toInt(), 0xFF3BE07A.toInt(),
+            0xFF2EC5FF.toInt(), 0xFF5B5BFF.toInt(), 0xFFC23BFF.toInt()
+        )
+        val off = (Math.random() * 360.0).toFloat()
+        return IntArray(level) { i -> Color.HSVToColor(floatArrayOf((off + i * 360f / level) % 360f, 0.72f, 1f)) }
+    }
+
+    /**
+     * Tap your picture (top right): a buzz and the achievement edge glow. Keep tapping to add colours - 1, 2, 3, 4, 5 -
+     * until it goes full rainbow, then it starts over. Stop for a few seconds and it resets too.
+     */
+    internal fun avatarEgg() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - eggLast > 6000L) eggLevel = 0
+        eggLast = now
+        eggLevel = if (eggLevel >= 6) 1 else eggLevel + 1
+        val level = eggLevel
+        if (level >= 6) {
+            buzz(VibrationEffect.createWaveform(longArrayOf(0, 40, 50, 40, 50, 90), intArrayOf(0, 160, 0, 200, 0, 255), -1))
+        } else {
+            buzz(VibrationEffect.createOneShot(25L + level * 10L, (70 + level * 30).coerceAtMost(255)))
+        }
+        avatarTop.animate().cancel()
+        avatarTop.scaleX = 1.18f
+        avatarTop.scaleY = 1.18f
+        avatarTop.animate().scaleX(1f).scaleY(1f).setDuration(380).setInterpolator(OvershootInterpolator(3f)).start()
+
+        eggGlow?.let { old -> old.fadeOut(420L) { root.removeView(old) } }
+        val g = EdgeGlowView(this, root.width, root.height, eggColors(level))
+        g.isClickable = false
+        g.isFocusable = false
+        g.alpha = 0.88f
+        g.elevation = dp(45).toFloat()
+        g.outlineProvider = null
+        root.addView(g, FrameLayout.LayoutParams(MATCH, MATCH))
+        eggGlow = g
+        g.flash()
+        g.calmAfter(1500L)
+        g.postDelayed({
+            if (eggGlow === g) {
+                eggGlow = null
+                g.fadeOut(900L) { root.removeView(g) }
+            }
+        }, 2600L)
     }
 
     internal fun previewCongrats() {
@@ -770,8 +1142,8 @@ class MainActivity : Activity() {
                 AppLog.add("Profile load failed: " + e.message)
             }
         }.start()
-        if (tab == 1) fetchEarned()
-        if (tab == 2) fetchCompletion()
+        if (tab == 1 || tab == 2) fetchEarned()
+        if (tab == 3) fetchCompletion()
     }
 
     private fun fetchEarned() {
@@ -784,7 +1156,7 @@ class MainActivity : Activity() {
                 val list = Ra.parseEarned(t)
                 if (t.length < 900000) prefs.edit().putString("earned", t).apply()
                 earnedAll = list
-                runOnUiThread { if (tab == 1) renderTab() }
+                runOnUiThread { if (tab == 1 || tab == 2) renderTab() }
             } catch (e: Exception) {
                 AppLog.add("Earned list failed: " + e.message)
             }
@@ -801,7 +1173,7 @@ class MainActivity : Activity() {
                 val list = Ra.parseCompletion(t)
                 prefs.edit().putString("completion", t).apply()
                 completion = list
-                runOnUiThread { if (tab == 2) renderTab() }
+                runOnUiThread { if (tab == 3) renderTab() }
             } catch (e: Exception) {
                 AppLog.add("Completion list failed: " + e.message)
             }
@@ -824,6 +1196,7 @@ class MainActivity : Activity() {
         drawer.setBackgroundColor(Pal.PANEL)
         drawer.isVerticalScrollBarEnabled = false
         drawer.isFocusable = false
+        drawer.overScrollMode = View.OVER_SCROLL_NEVER
         // closed drawer = off screen: nothing in it may be reached with the D-pad until it is opened from the menu
         drawer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         drawer.elevation = dp(16).toFloat()
@@ -853,14 +1226,17 @@ class MainActivity : Activity() {
         "account" -> "Account"
         "library" -> "Library"
         "glass" -> "Glass"
-        "anim" -> "Animations"
+        "anim" -> "Themes"
         "look" -> "Appearance"
         "popups" -> "Popups"
+        "buttons" -> "Button mapping"
+        "offline" -> "Offline Play"
         else -> "Tools and log"
     }
 
     internal fun showPage(name: String, animate: Boolean = true) {
         val from = page
+        if (from == "buttons" && name != "buttons") stopRecording()
         page = name
         logView = null
         logScroll = null
@@ -884,6 +1260,8 @@ class MainActivity : Activity() {
                 "anim" -> buildAnimPage(body)
                 "look" -> buildLookPage(body)
                 "popups" -> buildPopupsPage(body)
+                "buttons" -> buildButtonsPage(body)
+                "offline" -> buildOfflinePage(body)
                 else -> buildToolsPage(body)
             }
         }
@@ -914,7 +1292,7 @@ class MainActivity : Activity() {
     }
 
     /** Order of the tiles on the main settings page (see buildMenu). */
-    private val menuKeys = listOf("account", "library", "glass", "anim", "look", "popups", "tools")
+    private val menuKeys = listOf("account", "library", "offline", "glass", "anim", "look", "popups", "buttons", "tools")
 
     private fun toggleDrawer() {
         if (drawerOpen) closeDrawer() else openDrawer()
@@ -940,6 +1318,7 @@ class MainActivity : Activity() {
     internal fun closeDrawer() {
         if (!drawerOpen) return
         drawerOpen = false
+        stopRecording()
         // drop focus out of the panel before it is blocked, then hand it back to the home screen / game page
         currentFocus?.let { if (isInside(it, drawer)) it.clearFocus() }
         drawer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
@@ -992,6 +1371,18 @@ class MainActivity : Activity() {
     }
 
     // ---------- keys ----------
+    /** Cancels a combo recording that is in progress (leaving the page, closing the panel). */
+    internal fun stopRecording() {
+        keyRecorder = null
+        Hotkeys.paused = false
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val rec = keyRecorder
+        if (rec != null && rec(event)) return true
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         val cg = congrats
         if (cg != null && (keyCode == KeyEvent.KEYCODE_BUTTON_A || keyCode == KeyEvent.KEYCODE_BUTTON_B ||
@@ -1059,8 +1450,35 @@ class MainActivity : Activity() {
         statusDot.background = dot
     }
 
+    /** online / offline changes while the app is open */
+    private val netListener: (Boolean) -> Unit = { on ->
+        if (on) {
+            showNotice("Internet Established Online mode!", syncLine(), false)
+            OfflineProxy.flushAsync()
+            refreshAll(true)
+        } else {
+            showNotice("No internet running offline mode!", "Achievements still unlock - they are sent when you are back online", true)
+        }
+    }
+    private val queueListener: () -> Unit = { if (tab == 1 || tab == 2) renderTab() }
+
+    private fun syncLine(): String {
+        val n = OfflineProxy.pendingCount()
+        return if (n > 0) "Sending $n offline unlock${if (n == 1) "" else "s"} to RetroAchievements..." else "Everything is synced"
+    }
+
+    private var foilMotionHeld = false
+
     override fun onResume() {
         super.onResume()
+        foreground = true
+        NetMonitor.addListener(netListener)
+        OfflineProxy.queueListeners.add(queueListener)
+        if (OfflineProxy.pendingCount() > 0 && NetMonitor.online) OfflineProxy.flushAsync()
+        if (Foil.enabledFor("ui") && Foil.motion && !foilMotionHeld) {
+            FoilMotion.acquire(this)
+            foilMotionHeld = true
+        }
         bg.resume()
         showStatus()
         AppLog.listener = { line ->
@@ -1081,6 +1499,13 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        foreground = false
+        NetMonitor.removeListener(netListener)
+        OfflineProxy.queueListeners.remove(queueListener)
+        if (foilMotionHeld) {
+            FoilMotion.release()
+            foilMotionHeld = false
+        }
         AppLog.listener = null
         AppLog.statusListener = null
         bg.pause()

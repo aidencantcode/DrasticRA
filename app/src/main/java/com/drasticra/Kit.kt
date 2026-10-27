@@ -49,6 +49,16 @@ fun Context.tv(text: String, size: Float, color: Int, title: Boolean = false): T
 
 /** Glass card (refraction / frosted) or a plain solid card, depending on the Glass setting. */
 fun Context.card(radius: Int = 26): LinearLayout {
+    if (glassMode() == "off" && Foil.enabledFor("ui")) {
+        // plain cards, but drawn by the glass view so the foil can sit on them
+        val g = GlassLinear(this, "off")
+        g.orientation = LinearLayout.VERTICAL
+        g.radiusDp = radius
+        g.tintTop = 0x00FFFFFF
+        g.tintBottom = 0x00FFFFFF
+        g.elevation = dp(5).toFloat()
+        return g
+    }
     if (glassMode() != "off") {
         val g = GlassLinear(this)
         g.orientation = LinearLayout.VERTICAL
@@ -229,6 +239,49 @@ class BottomScrimView(ctx: Context) : View(ctx) {
     }
 }
 
+/** Round loading spinner: an accent-gradient arc that spins and breathes in length. */
+class SpinnerView(ctx: Context) : View(ctx) {
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val track = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val r = RectF()
+    private val m = Matrix()
+    private var sweep: SweepGradient? = null
+    private val born = SystemClock.uptimeMillis()
+
+    init {
+        p.style = Paint.Style.STROKE
+        p.strokeCap = Paint.Cap.ROUND
+        track.style = Paint.Style.STROKE
+        isFocusable = false
+    }
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val sw = min(w, h) * 0.13f
+        p.strokeWidth = sw
+        track.strokeWidth = sw
+        track.color = Pal.TEXT.withAlpha(if (Pal.light) 0x18 else 0x22)
+        val s = min(w, h) / 2f - sw
+        r.set(w / 2f - s, h / 2f - s, w / 2f + s, h / 2f + s)
+        c.drawOval(r, track)
+        val t = (SystemClock.uptimeMillis() - born) / 1000f
+        val rot = (t * 300f) % 360f
+        val len = 70f + 160f * (0.5f + 0.5f * kotlin.math.sin(t * 3.2f))
+        var sh = sweep
+        if (sh == null) {
+            sh = SweepGradient(0f, 0f, Pal.loop(), null)
+            sweep = sh
+        }
+        m.setRotate(rot)
+        m.postTranslate(w / 2f, h / 2f)
+        sh.setLocalMatrix(m)
+        p.shader = sh
+        c.drawArc(r, rot, len, false, p)
+        postInvalidateOnAnimation()
+    }
+}
+
 /** Moving gradient highlight that glides to whatever is focused with the D-pad / controller. */
 class FocusHalo(ctx: Context) : View(ctx) {
     private var target: View? = null
@@ -245,10 +298,23 @@ class FocusHalo(ctx: Context) : View(ctx) {
 
     init {
         glow.style = Paint.Style.STROKE
-        glow.strokeWidth = ctx.dp(6).toFloat()
-        glow.maskFilter = BlurMaskFilter(ctx.dp(10).toFloat(), BlurMaskFilter.Blur.NORMAL)
         ring.style = Paint.Style.STROKE
-        ring.strokeWidth = ctx.dp(2).toFloat()
+        loadStyle()
+        // never cast a shadow, whatever elevation the host gives it to stay above panels
+        outlineProvider = null
+        isClickable = false
+        isFocusable = false
+    }
+
+    /** Outline thickness from Appearance (0.5x .. 2.5x of the 2dp default); glow scales with it. */
+    fun loadStyle() {
+        val w = context.prefs().getInt("halo_w", 20) / 10f
+        val d = context.resources.displayMetrics.density
+        ring.strokeWidth = w * d
+        glow.strokeWidth = (2f + w * 2f) * d
+        glow.maskFilter = BlurMaskFilter((4f + w * 3f) * d, BlurMaskFilter.Blur.NORMAL)
+        sweep = null
+        invalidate()
     }
 
     fun follow(v: View?) {
@@ -267,7 +333,7 @@ class FocusHalo(ctx: Context) : View(ctx) {
         }
         v.getLocationInWindow(loc)
         getLocationInWindow(my)
-        val pad = context.dp(4).toFloat()
+        val pad = context.dp(4).toFloat() + ring.strokeWidth / 2f
         val l = (loc[0] - my[0]).toFloat() - pad
         val t = (loc[1] - my[1]).toFloat() - pad
         dst.set(l, t, l + v.width + pad * 2, t + v.height + pad * 2)
@@ -286,8 +352,9 @@ class FocusHalo(ctx: Context) : View(ctx) {
         if (s == null) {
             s = SweepGradient(
                 0f, 0f,
-                intArrayOf(Pal.ACC1, Pal.ACC2, 0xFFFFFFFF.toInt(), Pal.ACC2, Pal.ACC1),
-                floatArrayOf(0f, 0.3f, 0.5f, 0.7f, 1f)
+                if (Pal.acc3On) intArrayOf(Pal.ACC1, Pal.ACC2, Pal.ACC3, 0xFFFFFFFF.toInt(), Pal.ACC3, Pal.ACC2, Pal.ACC1)
+                else intArrayOf(Pal.ACC1, Pal.ACC2, 0xFFFFFFFF.toInt(), Pal.ACC2, Pal.ACC1),
+                null
             )
             sweep = s
         }

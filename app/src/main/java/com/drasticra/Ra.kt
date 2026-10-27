@@ -27,7 +27,7 @@ class RaHome(val profile: RaProfile, val recent: List<RaGame>, val earned: List<
 class RaLogin(val ok: Boolean, val user: String, val token: String, val error: String)
 
 object Ra {
-    private const val UA = "DrasticRA/0.5.0"
+    private const val UA = "DrasticRA/0.8.0"
 
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
@@ -82,6 +82,24 @@ object Ra {
 
     fun gameText(user: String, key: String, gameId: Int): String =
         api("API_GetGameInfoAndUserProgress.php", user, key, "&g=$gameId&a=1")
+
+    /** set by the app: where game pages are kept for offline viewing */
+    @Volatile var cacheDir: java.io.File? = null
+
+    /** [gameText] that remembers the answer and falls back to the last copy when there is no internet. */
+    fun gameTextCached(user: String, key: String, gameId: Int): String {
+        val f = cacheDir?.let { java.io.File(it, "game_$gameId.json") }
+        return try {
+            val t = gameText(user, key, gameId)
+            try {
+                f?.writeText(t)
+            } catch (_: Exception) {
+            }
+            t
+        } catch (e: Exception) {
+            if (f != null && f.exists()) f.readText() else throw e
+        }
+    }
 
     private fun JSONObject.str(k: String): String = if (has(k) && !isNull(k)) optString(k) else ""
 

@@ -202,6 +202,7 @@ object GameOverlay {
                     Pal.load(app)
                     Fonts.load(app)
                     Img.init(app)
+                    Foil.load(app)
                     val v = OverlayView(app, bmp, provider)
                     val wm = app.getSystemService(Context.WINDOW_SERVICE) as WindowManager
                     wm.addView(v, v.params())
@@ -297,16 +298,29 @@ class OverlayView(
         scrim.setOnClickListener { close() }
         addView(scrim, LayoutParams(MATCH, MATCH))
 
-        if (solid) {
+        if (solid && !Foil.enabledFor("overlay")) {
             panel = LinearLayout(ctx)
             val bg = GradientDrawable()
             bg.setColor(if (light) 0xF2F4F4FA.toInt() else 0xF21D2029.toInt())
             bg.cornerRadius = ctx.dp(30).toFloat()
             panel.background = bg
             panel.elevation = ctx.dp(12).toFloat()
+        } else if (solid) {
+            // solid panel drawn by the glass view so the holo foil can sit on it
+            val g = GlassLinear(ctx, "off")
+            g.radiusDp = 30
+            g.foilSurface = "overlay"
+            val c = if (light) 0xF2F4F4FA.toInt() else 0xF21D2029.toInt()
+            g.frostTop = c
+            g.frostBottom = c
+            g.tintTop = 0x00FFFFFF
+            g.tintBottom = 0x00FFFFFF
+            g.refreshColors()
+            panel = g
         } else {
             val g = GlassLinear(ctx, mode)
             g.radiusDp = 30
+            g.foilSurface = "overlay"
             if (light) {
                 g.tintTop = 0x9EFFFFFF.toInt()
                 g.tintBottom = 0x8CF2F3FA.toInt()
@@ -411,19 +425,29 @@ class OverlayView(
         // ---- list ----
         scroll.isVerticalScrollBarEnabled = false
         scroll.isFocusable = false
-        scroll.clipToPadding = false
+        // rows slightly outside the panel melt away into the glass instead of being cut off hard
+        scroll.clipToPadding = true
+        scroll.isVerticalFadingEdgeEnabled = true
+        scroll.setFadingEdgeLength(ctx.dp(36))
+        scroll.overScrollMode = View.OVER_SCROLL_NEVER
         listBox.orientation = LinearLayout.VERTICAL
         ctx.pad(listBox, 12, 4, 12, 12)
         scroll.addView(listBox)
         scroll.setOnScrollChangeListener { _, _, _, _, _ -> panel.invalidate() }
         panel.addView(scroll, ctx.ll(MATCH, 0, 1f))
 
-        val hint = ctx.tv("Tap outside, X or B to close   -   L1 / R1 tabs   -   Y refresh   -   X list / grid", 10f, subC)
+        val combo = Hotkeys.overlayCombo
+        val hint = ctx.tv(
+            (if (combo.isEmpty()) "" else Hotkeys.label(combo) + " toggles   -   ") +
+                "Tap outside, X or B to close   -   L1 / R1 tabs   -   Y refresh   -   X list / grid", 10f, subC
+        )
         hint.gravity = Gravity.CENTER
         hint.maxLines = 1
         hint.ellipsize = TextUtils.TruncateAt.END
         panel.addView(hint, ctx.ll(MATCH, WRAP, l = 16, r = 16, b = 10))
 
+        // above the panel (a solid panel has elevation, which would otherwise draw over the highlight)
+        halo.elevation = ctx.dp(40).toFloat()
         addView(halo, LayoutParams(MATCH, MATCH))
         viewTreeObserver.addOnGlobalFocusChangeListener { _, n -> halo.follow(n) }
 
@@ -487,8 +511,14 @@ class OverlayView(
         }
     }
 
+    private var motionHeld = false
+
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        if (Foil.enabledFor("overlay") && Foil.motion) {
+            FoilMotion.acquire(ctx)
+            motionHeld = true
+        }
         keepImmersive()
         ui.postDelayed(ticker, 1000L)
     }
@@ -499,6 +529,10 @@ class OverlayView(
     }
 
     override fun onDetachedFromWindow() {
+        if (motionHeld) {
+            motionHeld = false
+            FoilMotion.release()
+        }
         ui.removeCallbacksAndMessages(null)
         GameOverlay.detached(this)
         super.onDetachedFromWindow()
@@ -794,6 +828,8 @@ class OverlayView(
         line.orientation = LinearLayout.HORIZONTAL
         line.gravity = Gravity.CENTER_VERTICAL
         when {
+            a.unlocked && OfflineProxy.isPending(a.id) ->
+                line.addView(ctx.tv("\u2714  Completed - not synced yet", 13f, 0xFFE0A100.toInt(), true))
             a.unlocked -> line.addView(ctx.tv("\u2714  Completed", 13f, goodC, true))
             a.inProgress -> {
                 val t = if (a.progress.isNotEmpty()) "In progress  " + a.progress

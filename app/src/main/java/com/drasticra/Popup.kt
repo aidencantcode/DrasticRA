@@ -112,7 +112,24 @@ private fun lightenC(c: Int, t: Float): Int = Color.rgb(
  * the screen. It lives in its own full-screen, touch-through window behind the popup (so it can never
  * change the popup's size), flashes when a popup appears, breathes while it is up, and fades with [fadeOut].
  */
-class EdgeGlowView(ctx: Context, private val dispW: Int, private val dispH: Int) : View(ctx) {
+class EdgeGlowView(
+    ctx: Context,
+    private val dispW: Int,
+    private val dispH: Int,
+    colors: IntArray? = null,
+    positions: FloatArray? = null
+) : View(ctx) {
+    /** extra spin that decays: the "caught" screen starts the colours racing round and lets them slow down */
+    private var boost = 0f
+    private var boostAt = 0L
+    private var angle = 0f
+    private var lastFrame = 0L
+
+    fun spinFast(multiplier: Float) {
+        boost = multiplier
+        boostAt = SystemClock.uptimeMillis()
+        invalidate()
+    }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val maskPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val m = Matrix()
@@ -131,11 +148,15 @@ class EdgeGlowView(ctx: Context, private val dispW: Int, private val dispH: Int)
         // the glow is measured against the real display (not this window), so it hugs every edge of the screen
         // including the bottom, whatever size the system decided to give the overlay window
         mask = buildMask(dispW, dispH)
-        sweep = SweepGradient(
-            0f, 0f,
-            intArrayOf(Pal.ACC1, Pal.ACC2, lightenC(Pal.ACC2, 0.55f), Pal.ACC2, Pal.ACC1),
-            floatArrayOf(0f, 0.3f, 0.5f, 0.75f, 1f)
-        )
+        // custom colours (the avatar easter egg) are closed into a loop so the travelling seam never shows
+        // no colours given: whatever is picked in Appearance -> Edge glow
+        if (colors != null && colors.size >= 2) {
+            sweep = if (positions != null && positions.size == colors.size) SweepGradient(0f, 0f, colors, positions)
+            else SweepGradient(0f, 0f, intArrayOf(*colors, colors[0]), null)
+        } else {
+            val (c, ps) = EdgeStyle.resolve(ctx)
+            sweep = SweepGradient(0f, 0f, c, ps)
+        }
     }
 
     fun flash() {
@@ -203,7 +224,12 @@ class EdgeGlowView(ctx: Context, private val dispW: Int, private val dispH: Int)
         // where the real display sits relative to this view (normally 0,0 - but never assume it)
         getLocationOnScreen(loc)
         dst.set(-loc[0].toFloat(), -loc[1].toFloat(), dispW - loc[0].toFloat(), dispH - loc[1].toFloat())
-        m.setRotate((now % 6000L) / 6000f * 360f)
+        // travelling colours: one turn per 6 s, plus any decaying boost
+        val dt = if (lastFrame == 0L) 0L else (now - lastFrame).coerceAtMost(100L)
+        lastFrame = now
+        val extra = if (boost > 0f) boost * kotlin.math.exp(-(now - boostAt) / 1100f) else 0f
+        angle = (angle + dt / 6000f * 360f * (1f + extra)) % 360f
+        m.setRotate(angle)
         m.postTranslate(dst.centerX(), dst.centerY())
         s.setLocalMatrix(m)
         fill.shader = s
@@ -222,7 +248,8 @@ class EdgeGlowView(ctx: Context, private val dispW: Int, private val dispH: Int)
 class Popup(private val ctx: Context) {
     private class Data(
         val label: String, val title: String, val chip: String, val sub: String, val iconUrl: String?,
-        val desc: String, val extra: String, val pct: Int, val expandable: Boolean, val ms: Long
+        val desc: String, val extra: String, val pct: Int, val expandable: Boolean, val ms: Long,
+        val glow: IntArray? = null, val iconRes: Int = 0, val iconTint: Int = 0
     )
 
     private class Pop(val root: FrameLayout, val glass: LinearLayout, val expandBox: View?, val overlayBtn: View?)
@@ -289,10 +316,10 @@ class Popup(private val ctx: Context) {
         return lp
     }
 
-    private fun addEdge(): EdgeGlowView? {
+    private fun addEdge(colors: IntArray? = null): EdgeGlowView? {
         return try {
             val size = displaySize()
-            val e = EdgeGlowView(ctx, size.x, size.y)
+            val e = EdgeGlowView(ctx, size.x, size.y, colors)
             wm().addView(e, edgeParams(size))
             currentEdge = e
             e
@@ -352,6 +379,11 @@ class Popup(private val ctx: Context) {
         enqueue(Data("Tracking game", title, "$pct%", "$got / $total achievements", url, "", pts, pct, true, secs()))
     }
 
+    /** Online / offline notices: a coloured edge glow (yellow for offline) and a short status popup. */
+    fun status(label: String, title: String, sub: String, glow: IntArray?, chip: String, iconRes: Int, iconTint: Int) {
+        enqueue(Data(label, title, chip, sub, null, "", "", -1, false, 4200L, glow, iconRes, iconTint))
+    }
+
     fun mastered() {
         enqueue(Data("Game mastered", "You earned every achievement", "100%", "", null, "", "", 100, false, 6000L))
     }
@@ -381,10 +413,11 @@ class Popup(private val ctx: Context) {
             Pal.load(ctx)
             Fonts.load(ctx)
             Img.init(ctx)
+            Foil.load(ctx)
             val top =(ctx.prefs().getString("popup_pos", "top") ?: "top") != "bottom"
             val pop = build(d, bmp, top)
             // edge glow goes in first so the popup window sits above it
-            val edge = addEdge()
+            val edge = addEdge(d.glow)
             val lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -399,6 +432,11 @@ class Popup(private val ctx: Context) {
             val v = pop.root
             wm().addView(v, lp)
             current = v
+            // tilt-to-shift foil: hold the motion sensor while this popup is up
+            if (Foil.enabledFor("popup") && Foil.motion) {
+                FoilMotion.acquire(ctx)
+                v.tag = "motion"
+            }
 
             val off = (if (top) -ctx.dp(70) else ctx.dp(70)).toFloat()
             v.alpha = 0f
@@ -455,6 +493,7 @@ class Popup(private val ctx: Context) {
      */
     private fun dismiss(v: View, off: Float, edge: EdgeGlowView?, transitionRoot: android.view.ViewGroup) {
         if (v.tag == "gone") return
+        if (v.tag == "motion") FoilMotion.release()
         v.tag = "gone"
         v.isClickable = false
         TransitionManager.endTransitions(transitionRoot)
@@ -502,15 +541,27 @@ class Popup(private val ctx: Context) {
         root.clipToPadding = false
 
         val glass: LinearLayout
-        if (solid) {
+        if (solid && !Foil.enabledFor("popup")) {
             glass = LinearLayout(ctx)
             val bg = GradientDrawable()
             bg.setColor(0xFF23262F.toInt())
             bg.cornerRadius = ctx.dp(34).toFloat()
             glass.background = bg
+        } else if (solid) {
+            // solid popup, drawn by the glass view only so the holo foil can sit on it
+            val g = GlassLinear(ctx, "off")
+            g.radiusDp = 34
+            g.foilSurface = "popup"
+            g.frostTop = 0xFF23262F.toInt()
+            g.frostBottom = 0xFF23262F.toInt()
+            g.tintTop = 0x00FFFFFF
+            g.tintBottom = 0x00FFFFFF
+            g.refreshColors()
+            glass = g
         } else {
             val g = GlassLinear(ctx, mode)
             g.radiusDp = 34
+            g.foilSurface = "popup"
             g.band = true
             if (lightScene) {
                 g.tintTop = 0x66FFFFFF
@@ -549,8 +600,8 @@ class Popup(private val ctx: Context) {
         if (d.iconUrl.isNullOrEmpty()) {
             img.scaleType = ImageView.ScaleType.CENTER_INSIDE
             ctx.pad(img, 12, 12, 12, 12)
-            img.setImageResource(R.drawable.ic_trophy)
-            img.setColorFilter(if (lightScene && !solid) Pal.ACC1 else Color.WHITE)
+            img.setImageResource(if (d.iconRes != 0) d.iconRes else R.drawable.ic_trophy)
+            img.setColorFilter(if (d.iconTint != 0) d.iconTint else if (lightScene && !solid) Pal.ACC1 else Color.WHITE)
         } else {
             Img.load(d.iconUrl, img)
         }

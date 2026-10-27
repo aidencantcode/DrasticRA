@@ -34,6 +34,17 @@ class EngineService : Service() {
 
     @Volatile private var stopFlag = false
     private var rootProc: Process? = null
+    private var hotkeys: HotkeyWatcher? = null
+    /** online / offline changes while you play: shown as popups over the game (the app shows its own when in front) */
+    private val netListener: (Boolean) -> Unit = { on ->
+        if (!MainActivity.foreground) {
+            if (on) popup.status("Online mode", "Internet Established Online mode!", "Syncing your offline unlocks...",
+                null, "Online", R.drawable.ic_star, 0)
+            else popup.status("Offline mode", "No internet running offline mode!", "Unlocks are saved and sent later",
+                NetNotice.YELLOW, "Offline", R.drawable.ic_lock, NetNotice.YELLOW[0])
+        }
+        if (on) OfflineProxy.flushAsync()
+    }
     private var nativeReady = false
     private val http = Executors.newFixedThreadPool(3)
     private val done = ConcurrentLinkedQueue<HttpResult>()
@@ -42,7 +53,7 @@ class EngineService : Service() {
         p.onOpenOverlay = { GameOverlay.show(applicationContext) }
         p
     }
-    private var ua = "DrasticRA/0.5.0"
+    private var ua = "DrasticRA/0.8.0"
     @Volatile private var loginState = 0
     @Volatile private var gameState = 0
     @Volatile private var gameTitle = ""
@@ -90,12 +101,21 @@ class EngineService : Service() {
             return START_NOT_STICKY
         }
         if (running) return START_NOT_STICKY
+        NetMonitor.init(applicationContext)
+        OfflineStore.init(applicationContext)
         startForeground(1, notification("Waking up...", null))
         AppLog.setStatus("Starting...", true)
         val folder = intent?.getStringExtra("folder") ?: ""
         val pkg = intent?.getStringExtra("pkg") ?: "com.dsemu.drastic"
         running = true
         stopFlag = false
+        NetMonitor.addListener(netListener)
+        if (!NetMonitor.online && !MainActivity.foreground) {
+            popup.status("Offline mode", "No internet running offline mode!", "Unlocks are saved and sent later",
+                NetNotice.YELLOW, "Offline", R.drawable.ic_lock, NetNotice.YELLOW[0])
+        } else if (OfflineProxy.pendingCount() > 0) {
+            OfflineProxy.flushAsync()
+        }
         loginState = 0
         gameState = 0
         gameTitle = ""
@@ -212,10 +232,18 @@ class EngineService : Service() {
         ss.close()
         sock.tcpNoDelay = true
 
+        // controller combo (Button mapping page) that toggles the achievement overlay while you play
+        val hk = HotkeyWatcher(applicationContext) {
+            if (LiveGame.id != 0) GameOverlay.toggle(applicationContext) else GameOverlay.hide()
+        }
+        hotkeys = hk
+        hk.start()
+        if (Hotkeys.overlayCombo.isNotEmpty()) AppLog.add("Overlay combo: " + Hotkeys.label(Hotkeys.overlayCombo))
+
         // 2) rcheevos + login
         Native.create()
         nativeReady = true
-        ua = "DrasticRA/0.5.0 " + Native.userAgentClause()
+        ua = "DrasticRA/0.8.0 " + Native.userAgentClause()
         val token = prefs.getString("token", "") ?: ""
         val user = prefs.getString("user_ra", "") ?: ""
         if (token.isEmpty() || user.isEmpty()) {
@@ -378,6 +406,13 @@ class EngineService : Service() {
 
     private fun submit(id: Int, url: String, post: String?, ctype: String) {
         http.execute {
+            // offline proxy: real server when online (and caches what offline play needs), the cache when not
+            try {
+                val res = OfflineProxy.handle(url, post, ctype, ua)
+                done.add(HttpResult(id, res.status, res.body))
+                return@execute
+            } catch (_: Exception) {
+            }
             try {
                 val c = URL(url).openConnection() as HttpURLConnection
                 c.connectTimeout = 15000
@@ -464,6 +499,12 @@ class EngineService : Service() {
         } catch (_: Throwable) {
         }
         LiveGame.clear()
+        NetMonitor.removeListener(netListener)
+        try {
+            hotkeys?.stop()
+        } catch (_: Throwable) {
+        }
+        hotkeys = null
         android.os.Handler(android.os.Looper.getMainLooper()).post { GameOverlay.hide() }
         try {
             if (nativeReady) Native.shutdown()
