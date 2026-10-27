@@ -101,6 +101,7 @@ class EngineService : Service() {
             return START_NOT_STICKY
         }
         if (running) return START_NOT_STICKY
+        CrashLog.install(applicationContext)
         NetMonitor.init(applicationContext)
         OfflineStore.init(applicationContext)
         startForeground(1, notification("Waking up...", null))

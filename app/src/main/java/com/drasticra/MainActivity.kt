@@ -118,6 +118,9 @@ class MainActivity : Activity() {
     // ---------- build ----------
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
+        val lastCrash = CrashLog.take(this)
+        if (lastCrash != null) AppLog.add("---- LAST CRASH ----\n$lastCrash\n--------------------")
         Pal.load(this)
         Fonts.load(this)
         Img.init(this)
@@ -236,6 +239,11 @@ class MainActivity : Activity() {
                 first?.requestFocus()
                 if (!NetMonitor.online) {
                     showNotice("No internet running offline mode!", "Achievements still unlock - they are sent when you are back online", true)
+                }
+                if (lastCrash != null) {
+                    root.postDelayed({
+                        showNotice("The app crashed last time", "Details are in Settings -> Tools and log (Share log)", true)
+                    }, if (NetMonitor.online) 0L else 4600L)
                 }
             }
             prewarmGlass { gate.warmReady() }

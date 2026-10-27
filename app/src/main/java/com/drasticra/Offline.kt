@@ -37,9 +37,13 @@ object NetMonitor {
             if (inited) return
             inited = true
         }
-        val c = ctx.applicationContext.getSystemService(ConnectivityManager::class.java) ?: return
+        val c = try {
+            ctx.applicationContext.getSystemService(ConnectivityManager::class.java)
+        } catch (_: Throwable) {
+            null
+        } ?: return
         cm = c
-        online = hasInternet(c, c.activeNetwork)
+        online = hasInternet(c, safeActive(c))
         try {
             c.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
                 override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) {
@@ -48,24 +52,39 @@ object NetMonitor {
                 }
 
                 override fun onLost(n: Network) {
-                    set(hasInternet(c, c.activeNetwork))
+                    set(hasInternet(c, safeActive(c)))
                 }
             })
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
         }
+    }
+
+    /** never throws: without network-state access (or on odd ROMs) we just assume we can try the network */
+    private fun safeActive(c: ConnectivityManager): Network? = try {
+        c.activeNetwork
+    } catch (_: Throwable) {
+        null
     }
 
     private fun hasInternet(c: ConnectivityManager, n: Network?): Boolean {
         if (n == null) return false
-        val caps = c.getNetworkCapabilities(n) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        return try {
+            val caps = c.getNetworkCapabilities(n) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        } catch (_: Throwable) {
+            true
+        }
     }
 
     /** true when there is any network at all (worth trying a request even if Android has not validated it) */
     fun anyNetwork(): Boolean {
         val c = cm ?: return true
-        return c.activeNetwork != null
+        return try {
+            c.activeNetwork != null
+        } catch (_: Throwable) {
+            true
+        }
     }
 
     fun reportSuccess() {

@@ -12,8 +12,8 @@ android {
         applicationId = "com.drasticra"
         minSdk = 26
         targetSdk = 33
-        versionCode = 12
-        versionName = "0.8.0"
+        versionCode = 13
+        versionName = "0.8.1"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 

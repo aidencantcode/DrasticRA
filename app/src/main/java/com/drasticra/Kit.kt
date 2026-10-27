@@ -263,6 +263,7 @@ class SpinnerView(ctx: Context) : View(ctx) {
         track.strokeWidth = sw
         track.color = Pal.TEXT.withAlpha(if (Pal.light) 0x18 else 0x22)
         val s = min(w, h) / 2f - sw
+        if (s <= 0f) return
         r.set(w / 2f - s, h / 2f - s, w / 2f + s, h / 2f + s)
         c.drawOval(r, track)
         val t = (SystemClock.uptimeMillis() - born) / 1000f

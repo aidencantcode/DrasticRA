@@ -25,6 +25,7 @@ private class CaughtVignette(ctx: android.content.Context) : View(ctx) {
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         super.onSizeChanged(w, h, ow, oh)
+        if (w <= 0 || h <= 0) return
         val r = kotlin.math.max(w, h) * 0.75f
         p.shader = RadialGradient(w / 2f, h / 2f, r,
             intArrayOf(0xF0000000.toInt(), 0xD8000000.toInt(), 0x8C000000.toInt()), floatArrayOf(0f, 0.55f, 1f),

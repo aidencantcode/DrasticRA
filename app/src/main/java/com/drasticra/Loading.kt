@@ -168,6 +168,7 @@ class AccentAuraView(ctx: Context) : View(ctx) {
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         super.onSizeChanged(w, h, ow, oh)
+        if (w <= 0 || h <= 0) return
         val r = max(w, h) * 0.55f
         val a = if (Pal.light) 0x66 else 0x80
         blobs = colors().map {
