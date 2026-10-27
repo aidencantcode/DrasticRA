@@ -83,6 +83,8 @@ class MainActivity : Activity() {
     private var completion: List<RaGame>? = null
     private var detail: GameDetailView? = null
     private var congrats: CongratsView? = null
+    /** what had the controller highlight on the home screen before the drawer / a game page took over */
+    private var lastMainFocus: View? = null
 
     // ---------- system ui ----------
     @Suppress("DEPRECATION")
@@ -147,6 +149,8 @@ class MainActivity : Activity() {
         contentScroll.clipToPadding = false
         contentScroll.clipChildren = false
         contentScroll.isVerticalScrollBarEnabled = false
+        // the scroll view itself must never take the highlight (it would outline the whole list)
+        contentScroll.isFocusable = false
         content = LinearLayout(this)
         content.orientation = LinearLayout.VERTICAL
         content.clipChildren = false
@@ -174,7 +178,16 @@ class MainActivity : Activity() {
 
         halo = FocusHalo(this)
         root.addView(halo, FrameLayout.LayoutParams(MATCH, MATCH))
-        root.viewTreeObserver.addOnGlobalFocusChangeListener { _, n -> halo.follow(n) }
+        root.viewTreeObserver.addOnGlobalFocusChangeListener { _, n ->
+            // safety net: while the drawer is closed nothing inside it may hold focus (it sits off screen)
+            if (n != null && !drawerOpen && isInside(n, drawer)) {
+                halo.follow(null)
+                n.clearFocus()
+                focusHome()
+                return@addOnGlobalFocusChangeListener
+            }
+            halo.follow(n)
+        }
 
         setContentView(root)
         hideSystemUi()
@@ -354,6 +367,41 @@ class MainActivity : Activity() {
         header.visibility = if (t >= 1f) View.INVISIBLE else View.VISIBLE
     }
 
+    // ---------- controller focus ----------
+    internal fun isInside(v: View, group: View): Boolean {
+        var p: View? = v
+        while (p != null) {
+            if (p === group) return true
+            p = p.parent as? View
+        }
+        return false
+    }
+
+    /** First focusable, visible view inside [g] in layout order. */
+    internal fun firstFocusable(g: ViewGroup): View? {
+        if (g.descendantFocusability == ViewGroup.FOCUS_BLOCK_DESCENDANTS) return null
+        for (i in 0 until g.childCount) {
+            val c = g.getChildAt(i)
+            if (c.visibility != View.VISIBLE) continue
+            if (c.isFocusable && c.isEnabled) return c
+            if (c is ViewGroup) firstFocusable(c)?.let { return it }
+        }
+        return null
+    }
+
+    /** Puts the highlight back on the home screen: the last thing selected there, else the current tab. */
+    private fun focusHome() {
+        val d = detail
+        if (d != null) {
+            firstFocusable(d)?.requestFocus()
+            return
+        }
+        val last = lastMainFocus
+        if (last != null && last.isAttachedToWindow && last.isShown && last.requestFocus()) return
+        val t = tabViews.getOrNull(tab)
+        if (t != null && t.isShown) t.requestFocus() else firstFocusable(content)?.requestFocus()
+    }
+
     // ---------- tabs ----------
     private fun styleTabs() {
         for (i in tabViews.indices) {
@@ -416,6 +464,22 @@ class MainActivity : Activity() {
     }
 
     internal fun renderTab() {
+        // remember which card had the highlight, so a refresh does not throw it somewhere random
+        val f = currentFocus
+        var focusIdx = -1
+        if (f != null && isInside(f, content)) {
+            var i = 0
+            for (r in 0 until content.childCount) {
+                val row = content.getChildAt(r) as? ViewGroup ?: continue
+                for (c in 0 until row.childCount) {
+                    val cv = row.getChildAt(c)
+                    if (cv.isFocusable) {
+                        if (cv === f || isInside(f, cv)) focusIdx = i
+                        i++
+                    }
+                }
+            }
+        }
         content.removeAllViews()
         // a new list may clamp the scroll position, so re-check the header once it has been laid out
         contentScroll.post { updateHeaderFade(contentScroll.scrollY) }
@@ -457,6 +521,7 @@ class MainActivity : Activity() {
             m.addView(tv(emptyMsg, 14f, Pal.SUB))
             content.addView(m, ll(MATCH, WRAP))
             m.popIn(0)
+            if (focusIdx >= 0) tabViews.getOrNull(tab)?.requestFocus()
             return
         }
         val cols = if (grid && resources.configuration.screenWidthDp >= 560) 2 else 1
@@ -477,6 +542,10 @@ class MainActivity : Activity() {
             }
             content.addView(row, ll(MATCH, WRAP, t = if (i == 0) 0 else 12))
             i += cols
+        }
+        if (focusIdx >= 0) {
+            val target = cards[minOf(focusIdx, cards.size - 1)]
+            target.post { if (!drawerOpen && detail == null) target.requestFocus() }
         }
         GlassBackdrop.invalidateAll()
     }
@@ -588,6 +657,7 @@ class MainActivity : Activity() {
     // ---------- detail / congrats ----------
     internal fun openDetail(g: RaGame) {
         if (detail != null || g.id == 0) return
+        lastMainFocus = currentFocus?.takeIf { isInside(it, mainLayer) }
         val d = GameDetailView(this, g) { closeDetailNow() }
         detail = d
         mainLayer.visibility = View.INVISIBLE
@@ -601,6 +671,7 @@ class MainActivity : Activity() {
         detail = null
         mainLayer.visibility = View.VISIBLE
         GlassBackdrop.tick()
+        mainLayer.post { if (!drawerOpen) focusHome() }
     }
 
     internal fun showCongrats(items: List<UnseenItem>) {
@@ -752,6 +823,9 @@ class MainActivity : Activity() {
         drawer = ScrollView(this)
         drawer.setBackgroundColor(Pal.PANEL)
         drawer.isVerticalScrollBarEnabled = false
+        drawer.isFocusable = false
+        // closed drawer = off screen: nothing in it may be reached with the D-pad until it is opened from the menu
+        drawer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         drawer.elevation = dp(16).toFloat()
         root.addView(drawer, FrameLayout.LayoutParams(drawerWidth, MATCH))
         drawer.translationX = -drawerWidth.toFloat()
@@ -766,9 +840,12 @@ class MainActivity : Activity() {
         showPage(if (wasOpen) (saved?.getString("page") ?: "main") else "main", false)
         if (wasOpen) {
             drawerOpen = true
+            drawer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+            mainLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
             drawerScrim.visibility = View.VISIBLE
             drawerScrim.alpha = 1f
             drawer.translationX = 0f
+            drawerCol.post { firstFocusable(drawerCol)?.requestFocus() }
         }
     }
 
@@ -783,6 +860,7 @@ class MainActivity : Activity() {
     }
 
     internal fun showPage(name: String, animate: Boolean = true) {
+        val from = page
         page = name
         logView = null
         logScroll = null
@@ -813,7 +891,30 @@ class MainActivity : Activity() {
         if (animate) {
             for (i in 0 until drawerCol.childCount) drawerCol.getChildAt(i).popIn(i * 35L)
         }
+        // keep the controller highlight inside the panel: back on the tile we came from, or the first control
+        if (drawerOpen) {
+            drawerCol.post {
+                var target: View? = null
+                if (name == "main" && from != "main") {
+                    val idx = menuKeys.indexOf(from)
+                    if (idx >= 0) {
+                        var n = 0
+                        for (i in 0 until drawerCol.childCount) {
+                            val c = drawerCol.getChildAt(i)
+                            if (c.isFocusable) {
+                                if (n == idx) target = c
+                                n++
+                            }
+                        }
+                    }
+                }
+                (target ?: firstFocusable(drawerCol))?.requestFocus()
+            }
+        }
     }
+
+    /** Order of the tiles on the main settings page (see buildMenu). */
+    private val menuKeys = listOf("account", "library", "glass", "anim", "look", "popups", "tools")
 
     private fun toggleDrawer() {
         if (drawerOpen) closeDrawer() else openDrawer()
@@ -822,20 +923,29 @@ class MainActivity : Activity() {
     internal fun openDrawer() {
         if (drawerOpen) return
         drawerOpen = true
+        currentFocus?.let { if (isInside(it, mainLayer)) lastMainFocus = it }
         mainLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        detail?.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        drawer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         // glass in a closed drawer is not redrawn, so refresh it once before it slides into view
         if (drawer.translationX <= -drawerWidth + 1f) drawer.translationX = -drawerWidth + 3f
         GlassBackdrop.tick()
         drawerScrim.visibility = View.VISIBLE
         drawerScrim.animate().alpha(1f).setDuration(240).start()
         drawer.animate().translationX(0f).setDuration(340).setInterpolator(OvershootInterpolator(0.6f)).start()
-        drawerCol.post { drawerCol.getChildAt(1)?.requestFocus() }
+        // child 1 on the main page is a text line, so look for the first real control instead
+        drawerCol.post { firstFocusable(drawerCol)?.requestFocus() }
     }
 
     internal fun closeDrawer() {
         if (!drawerOpen) return
         drawerOpen = false
+        // drop focus out of the panel before it is blocked, then hand it back to the home screen / game page
+        currentFocus?.let { if (isInside(it, drawer)) it.clearFocus() }
+        drawer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         mainLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        detail?.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        focusHome()
         drawerScrim.animate().alpha(0f).setDuration(200).withEndAction { drawerScrim.visibility = View.GONE }.start()
         drawer.animate().translationX(-drawerWidth.toFloat()).setDuration(260).start()
     }
@@ -896,11 +1006,15 @@ class MainActivity : Activity() {
         }
         when (keyCode) {
             KeyEvent.KEYCODE_BUTTON_L1 -> {
-                if (dt == null && !drawerOpen) selectTab(tab - 1)
+                if (!drawerOpen) {
+                    if (dt != null) dt.cycleFilter(-1) else selectTab(tab - 1)
+                }
                 return true
             }
             KeyEvent.KEYCODE_BUTTON_R1 -> {
-                if (dt == null && !drawerOpen) selectTab(tab + 1)
+                if (!drawerOpen) {
+                    if (dt != null) dt.cycleFilter(1) else selectTab(tab + 1)
+                }
                 return true
             }
             KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_MENU -> {
@@ -1029,10 +1143,30 @@ class MainActivity : Activity() {
                     return@runOnUiThread
                 }
                 val pop = Popup(applicationContext)
+                // expanded test popups get the overlay button too; with no game running it opens the sample overlay
+                pop.onOpenOverlay = {
+                    if (LiveGame.id != 0) GameOverlay.show(applicationContext) else GameOverlay.showDemo(applicationContext)
+                }
                 val h = Handler(mainLooper)
                 h.postDelayed({ pop.game("Pokemon SoulSilver", "", 12, 59, "35 / 410 pts") }, 5000)
                 h.postDelayed({ pop.unlock("Test Achievement", "This is what an unlock looks like.", "10", null, "Pokemon SoulSilver", 1250) }, 5200)
                 h.postDelayed({ pop.progress("Test Achievement", "3 / 10", null) }, 5300)
+            }
+        }.start()
+    }
+
+    /** Popups page: shows the in-game overlay (live game if one is being watched, otherwise sample data). */
+    internal fun previewOverlay() {
+        Thread {
+            rootSh("appops set $packageName SYSTEM_ALERT_WINDOW allow")
+            runOnUiThread {
+                if (!Settings.canDrawOverlays(this)) {
+                    AppLog.add("Turn ON 'Display over other apps' for Drastic RA, then try again.")
+                    startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                    return@runOnUiThread
+                }
+                closeDrawer()
+                if (LiveGame.id != 0) GameOverlay.show(applicationContext) else GameOverlay.showDemo(applicationContext)
             }
         }.start()
     }

@@ -19,5 +19,7 @@ object Native {
     external fun nextEvent(): String?
     external fun readHeader(out: ByteArray): Int
     external fun unload()
+    /** UTF-8 list of every core achievement with live progress (see dsra_jni.cpp for the layout). */
+    external fun achievementList(): ByteArray?
     external fun shutdown()
 }

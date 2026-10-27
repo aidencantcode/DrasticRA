@@ -345,6 +345,7 @@ private fun MainActivity.swatches(): View {
     )
     val hs = HorizontalScrollView(this)
     hs.isHorizontalScrollBarEnabled = false
+    hs.isFocusable = false
     val row = LinearLayout(this)
     row.orientation = LinearLayout.HORIZONTAL
     for (p in presets) {
@@ -442,6 +443,15 @@ internal fun MainActivity.buildPopupsPage(col: LinearLayout) {
     pc.addView(chip("Test popups", false) { testPopup() }, ll(MATCH, WRAP, t = 14))
     pc.addView(tv("Test popups appear 5 s after tapping - close this panel and switch to your game.", 11f, Pal.SUB), ll(WRAP, WRAP, t = 8))
     col.addView(pc, ll(MATCH, WRAP))
+
+    val oc = sectionCard("IN-GAME OVERLAY")
+    oc.addView(tv(
+        "While a game is being watched, tap the Drastic RA notification (or 'View achievements' in an opened popup) " +
+            "to show the game's achievements over it: session and total play time, progress, and In progress / " +
+            "Unlocked / Locked / All tabs. Its glass follows Popup glass in the Glass page.", 11f, Pal.SUB
+    ), ll(WRAP, WRAP, t = 8))
+    oc.addView(chip("Preview overlay", false) { previewOverlay() }, ll(MATCH, WRAP, t = 12))
+    col.addView(oc, ll(MATCH, WRAP, t = 12))
 }
 
 // ---------- tools ----------
@@ -453,6 +463,7 @@ internal fun MainActivity.buildToolsPage(col: LinearLayout) {
 
     val lg = sectionCard("LOG")
     val sv = ScrollView(this)
+    sv.isFocusable = false
     val lv = tv(AppLog.all(), 11f, Pal.SUB)
     lv.typeface = Typeface.MONOSPACE
     lv.setTextIsSelectable(true)

@@ -259,7 +259,12 @@ class FocusHalo(ctx: Context) : View(ctx) {
 
     override fun onDraw(c: Canvas) {
         val v = target ?: return
-        if (!v.isShown || !v.isFocused) return
+        if (!v.isFocused) return
+        if (!v.isShown) {
+            // e.g. a header that faded out while focused: check again shortly so the halo returns with it
+            postInvalidateDelayed(120)
+            return
+        }
         v.getLocationInWindow(loc)
         getLocationInWindow(my)
         val pad = context.dp(4).toFloat()

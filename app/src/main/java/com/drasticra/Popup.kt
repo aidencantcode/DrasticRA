@@ -26,6 +26,8 @@ import android.transition.TransitionSet
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -121,6 +123,8 @@ class EdgeGlowView(ctx: Context, private val dispW: Int, private val dispH: Int)
     private val bornAt = SystemClock.uptimeMillis()
     private var flashAt = 0L
     private var closeAt = 0L
+    private var closeMs = 700f
+    private var calmAt = 0L
 
     init {
         maskPaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
@@ -139,9 +143,21 @@ class EdgeGlowView(ctx: Context, private val dispW: Int, private val dispH: Int)
         invalidate()
     }
 
-    fun fadeOut() {
-        if (closeAt == 0L) closeAt = SystemClock.uptimeMillis()
+    /** Smoothly dissolves the glow over [ms]; [onGone] runs once it is fully invisible. */
+    fun fadeOut(ms: Long = 700L, onGone: (() -> Unit)? = null) {
+        if (closeAt == 0L) {
+            closeAt = SystemClock.uptimeMillis()
+            closeMs = ms.toFloat()
+            if (onGone != null) postDelayed({ onGone() }, ms + 60L)
+        } else if (onGone != null) {
+            postDelayed({ onGone() }, max(0L, (closeAt + closeMs.toLong()) - SystemClock.uptimeMillis()) + 60L)
+        }
         invalidate()
+    }
+
+    /** After a while the glow settles down to a faint rim instead of staying bright for the whole popup. */
+    fun calmAfter(ms: Long) {
+        calmAt = SystemClock.uptimeMillis() + ms
     }
 
     /** Small alpha-only picture: strongest right at the screen edge, melting away ~35dp inwards. */
@@ -171,11 +187,16 @@ class EdgeGlowView(ctx: Context, private val dispW: Int, private val dispH: Int)
         val now = SystemClock.uptimeMillis()
         val tIn = ((now - bornAt) / 420f).coerceIn(0f, 1f)
         val inK = tIn * tIn * (3f - 2f * tIn)
-        val outK = if (closeAt == 0L) 1f else 1f - ((now - closeAt) / 240f).coerceIn(0f, 1f)
+        // smoothstep fade-out, so the glow melts away instead of blinking off
+        val tOut = if (closeAt == 0L) 0f else ((now - closeAt) / closeMs).coerceIn(0f, 1f)
+        val outK = 1f - tOut * tOut * (3f - 2f * tOut)
+        // settle to ~35% once the popup has been up for a while (a flash brings it back up)
+        val tCalm = if (calmAt == 0L || now < calmAt) 0f else ((now - calmAt) / 900f).coerceIn(0f, 1f)
+        val calmK = 1f - 0.65f * (tCalm * tCalm * (3f - 2f * tCalm))
         val flashAge = (now - flashAt) / 700f
         val fl = if (flashAt != 0L && flashAge < 1f) 1f - flashAge else 0f
         val pulse = 0.82f + 0.18f * sin(now / 420f)
-        val k = (inK * outK * pulse * (1f + 0.45f * fl)).coerceIn(0f, 1f)
+        val k = (inK * outK * pulse * max(calmK, fl) * (1f + 0.45f * fl)).coerceIn(0f, 1f)
 
         val w = width.toFloat()
         val h = height.toFloat()
@@ -204,7 +225,7 @@ class Popup(private val ctx: Context) {
         val desc: String, val extra: String, val pct: Int, val expandable: Boolean, val ms: Long
     )
 
-    private class Pop(val root: FrameLayout, val glass: LinearLayout, val expandBox: View?)
+    private class Pop(val root: FrameLayout, val glass: LinearLayout, val expandBox: View?, val overlayBtn: View?)
 
     private val ui = Handler(Looper.getMainLooper())
     private val queue = LinkedList<Data>()
@@ -212,6 +233,8 @@ class Popup(private val ctx: Context) {
     private var current: View? = null
     private var currentEdge: EdgeGlowView? = null
     private var pendingDismiss: Runnable? = null
+    /** When set, expanded popups get a "View achievements" button that opens the in-game overlay. */
+    var onOpenOverlay: (() -> Unit)? = null
 
     private fun wm(): WindowManager = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
@@ -280,6 +303,7 @@ class Popup(private val ctx: Context) {
 
     private fun removeEdge(e: View?) {
         if (e == null) return
+        e.visibility = View.INVISIBLE
         try {
             wm().removeView(e)
         } catch (_: Exception) {
@@ -371,31 +395,39 @@ class Popup(private val ctx: Context) {
             )
             lp.gravity = (if (top) Gravity.TOP else Gravity.BOTTOM) or Gravity.CENTER_HORIZONTAL
             lp.y = ctx.dp(2)
+            lp.windowAnimations = 0
             val v = pop.root
             wm().addView(v, lp)
             current = v
 
             val off = (if (top) -ctx.dp(70) else ctx.dp(70)).toFloat()
             v.alpha = 0f
-            v.scaleX = 0.55f
-            v.scaleY = 0.55f
+            v.scaleX = 0.7f
+            v.scaleY = 0.7f
             v.translationY = off
             v.animate().alpha(1f).scaleX(1f).scaleY(1f).translationY(0f)
                 .setDuration(520).setInterpolator(OvershootInterpolator(1.8f)).start()
             edge?.flash()
+            edge?.calmAfter(2200L)
 
             var expanded = false
             val schedule = { ms: Long ->
                 pendingDismiss?.let { ui.removeCallbacks(it) }
-                val r = Runnable { dismiss(v, off, edge) }
+                val r = Runnable { dismiss(v, off, edge, pop.root) }
                 pendingDismiss = r
                 ui.postDelayed(r, ms)
             }
             schedule(d.ms)
+            pop.overlayBtn?.setOnClickListener {
+                pendingDismiss?.let { ui.removeCallbacks(it) }
+                dismiss(v, off, edge, pop.root)
+                onOpenOverlay?.invoke()
+            }
             v.setOnClickListener {
+                if (v.tag == "gone") return@setOnClickListener
                 if (!d.expandable || expanded) {
                     pendingDismiss?.let { ui.removeCallbacks(it) }
-                    dismiss(v, off, edge)
+                    dismiss(v, off, edge, pop.root)
                 } else {
                     expanded = true
                     val ts = TransitionSet()
@@ -417,19 +449,32 @@ class Popup(private val ctx: Context) {
         }
     }
 
-    private fun dismiss(v: View, off: Float, edge: EdgeGlowView?) {
+    /**
+     * Fades the popup out in one smooth, hardware-layered pass (no scaling, which made the refracted glass jump
+     * and flicker) and lets the edge glow melt away on its own clock before its window is removed.
+     */
+    private fun dismiss(v: View, off: Float, edge: EdgeGlowView?, transitionRoot: android.view.ViewGroup) {
         if (v.tag == "gone") return
         v.tag = "gone"
-        edge?.fadeOut()
-        v.animate().alpha(0f).scaleX(0.9f).scaleY(0.9f).translationY(off * 0.5f).setDuration(240).withEndAction {
-            try {
-                wm().removeView(v)
-            } catch (_: Exception) {
-            }
-            removeEdge(edge)
-            if (current === v) current = null
-            ui.postDelayed({ next() }, 260)
-        }.start()
+        v.isClickable = false
+        TransitionManager.endTransitions(transitionRoot)
+        if (edge != null) edge.fadeOut(750L) { removeEdge(edge) }
+        v.animate().cancel()
+        v.animate().alpha(0f).translationY(off * 0.25f).scaleX(1f).scaleY(1f)
+            .setDuration(480).setInterpolator(AccelerateDecelerateInterpolator())
+            .withLayer()
+            .withEndAction {
+                // hide first so the last composed frame is empty, then drop the window on the next loop
+                v.visibility = View.INVISIBLE
+                ui.post {
+                    try {
+                        wm().removeView(v)
+                    } catch (_: Exception) {
+                    }
+                }
+                if (current === v) current = null
+                ui.postDelayed({ next() }, 320)
+            }.start()
     }
 
     private fun build(d: Data, bmp: Bitmap?, top: Boolean): Pop {
@@ -538,6 +583,7 @@ class Popup(private val ctx: Context) {
         glass.addView(row)
 
         var expandBox: View? = null
+        var overlayBtn: View? = null
         if (d.expandable) {
             val ex = LinearLayout(ctx)
             ex.orientation = LinearLayout.VERTICAL
@@ -550,10 +596,19 @@ class Popup(private val ctx: Context) {
             }
             if (d.pct >= 0) ex.addView(ctx.progressBar(d.pct, 6, false), ctx.ll(MATCH, WRAP, t = 8))
             if (d.extra.isNotEmpty()) ex.addView(ctx.tv(d.extra, 12f, accent, true), ctx.ll(WRAP, WRAP, t = 8))
+            if (onOpenOverlay != null) {
+                val b = ctx.tv("View achievements  \u203A", 13f, Color.WHITE, true)
+                b.gravity = Gravity.CENTER
+                ctx.pad(b, 14, 8, 14, 8)
+                b.background = ctx.accentFill(16)
+                b.isClickable = true
+                ex.addView(b, ctx.ll(WRAP, WRAP, t = 10))
+                overlayBtn = b
+            }
             ex.addView(ctx.tv("Tap again to close", 10f, subC), ctx.ll(WRAP, WRAP, t = 6))
             glass.addView(ex)
             expandBox = ex
         }
-        return Pop(root, glass, expandBox)
+        return Pop(root, glass, expandBox, overlayBtn)
     }
 }

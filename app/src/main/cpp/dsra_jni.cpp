@@ -316,6 +316,50 @@ JNIEXPORT jint JNICALL Java_com_drasticra_Native_readHeader(JNIEnv* env, jobject
     return buf[0] == 1 ? 1 : 0;
 }
 
+/*
+ * Every core achievement of the loaded game with its live state, for the in-game overlay.
+ * Records are separated by \036, fields by \037:
+ * id, title, description, badge, points, unlocked(0/1), measured_progress, measured_percent, unlock_time, bucket
+ */
+JNIEXPORT jbyteArray JNICALL Java_com_drasticra_Native_achievementList(JNIEnv* env, jobject) {
+    std::string out;
+    if (g_client) {
+        rc_client_achievement_list_t* list = rc_client_create_achievement_list(
+            g_client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE, RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
+        if (list) {
+            char num[64];
+            for (uint32_t b = 0; b < list->num_buckets; b++) {
+                const rc_client_achievement_bucket_t* bucket = &list->buckets[b];
+                for (uint32_t i = 0; i < bucket->num_achievements; i++) {
+                    const rc_client_achievement_t* a = bucket->achievements[i];
+                    if (!a) continue;
+                    if (!out.empty()) out += "\036";
+                    snprintf(num, sizeof num, "%u", (unsigned)a->id);
+                    out += num; out += SEP;
+                    out += S(a->title); out += SEP;
+                    out += S(a->description); out += SEP;
+                    out += a->badge_name; out += SEP;
+                    snprintf(num, sizeof num, "%u", (unsigned)a->points);
+                    out += num; out += SEP;
+                    out += (a->unlocked ? "1" : "0"); out += SEP;
+                    out += a->measured_progress; out += SEP;
+                    snprintf(num, sizeof num, "%.2f", (double)a->measured_percent);
+                    out += num; out += SEP;
+                    snprintf(num, sizeof num, "%lld", (long long)a->unlock_time);
+                    out += num; out += SEP;
+                    snprintf(num, sizeof num, "%u", (unsigned)bucket->bucket_type);
+                    out += num;
+                }
+            }
+            rc_client_destroy_achievement_list(list);
+        }
+    }
+    /* raw UTF-8 bytes: titles may hold characters NewStringUTF's modified UTF-8 cannot take */
+    jbyteArray arr = env->NewByteArray((jsize)out.size());
+    if (arr && !out.empty()) env->SetByteArrayRegion(arr, 0, (jsize)out.size(), (const jbyte*)out.data());
+    return arr;
+}
+
 JNIEXPORT void JNICALL Java_com_drasticra_Native_unload(JNIEnv*, jobject) {
     if (g_client) rc_client_unload_game(g_client);
     memset(g_used, 0, sizeof g_used);

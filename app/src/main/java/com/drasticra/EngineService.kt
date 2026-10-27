@@ -25,6 +25,8 @@ class EngineService : Service() {
     companion object {
         const val ACTION_START = "com.drasticra.START"
         const val ACTION_STOP = "com.drasticra.STOP"
+        /** tap on the ongoing notification / popup button: show or hide the in-game achievement overlay */
+        const val ACTION_OVERLAY = "com.drasticra.OVERLAY"
         @Volatile var running = false
     }
 
@@ -35,7 +37,11 @@ class EngineService : Service() {
     private var nativeReady = false
     private val http = Executors.newFixedThreadPool(3)
     private val done = ConcurrentLinkedQueue<HttpResult>()
-    private val popup by lazy { Popup(applicationContext) }
+    private val popup by lazy {
+        val p = Popup(applicationContext)
+        p.onOpenOverlay = { GameOverlay.show(applicationContext) }
+        p
+    }
     private var ua = "DrasticRA/0.5.0"
     @Volatile private var loginState = 0
     @Volatile private var gameState = 0
@@ -68,6 +74,19 @@ class EngineService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             stopFlag = true
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_OVERLAY) {
+            if (running && LiveGame.id != 0) {
+                GameOverlay.toggle(applicationContext)
+            } else {
+                // nothing is being played: the notification just opens the app
+                try {
+                    startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } catch (_: Exception) {
+                }
+                if (!running) stopSelf()
+            }
             return START_NOT_STICKY
         }
         if (running) return START_NOT_STICKY
@@ -105,8 +124,12 @@ class EngineService : Service() {
         val now = SystemClock.elapsedRealtime()
         val dt = now - playLast
         playLast = now
-        if (loaded && playId != 0 && visible && dt in 1L..5000L) playPending += dt
+        if (loaded && playId != 0 && visible && dt in 1L..5000L) {
+            playPending += dt
+            LiveGame.sessionMs += dt
+        }
         if (playPending > 0 && now - playFlushAt >= 15000) playFlush()
+        LiveGame.pendingMs = playPending
     }
 
     private fun playFlush() {
@@ -116,6 +139,7 @@ class EngineService : Service() {
         val key = "play_ms_$playId"
         sp.edit().putLong(key, sp.getLong(key, 0L) + playPending).apply()
         playPending = 0
+        LiveGame.pendingMs = 0
     }
 
     private fun playStop() {
@@ -129,13 +153,25 @@ class EngineService : Service() {
             nm.createNotificationChannel(NotificationChannel("dsra", "Drastic RA", NotificationManager.IMPORTANCE_LOW))
             channelMade = true
         }
-        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val app = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        // tapping the notification while a game runs opens the achievement overlay over the game
+        val ov = PendingIntent.getService(
+            this, 1, Intent(this, EngineService::class.java).setAction(ACTION_OVERLAY),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val playing = LiveGame.id != 0
         val b = Notification.Builder(this, "dsra")
             .setContentTitle("Drastic RA")
-            .setContentText(text)
+            .setContentText(if (playing) "$text  -  tap for achievements" else text)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pi)
+            .setContentIntent(if (playing) ov else app)
             .setOngoing(true)
+        if (playing) {
+            @Suppress("DEPRECATION")
+            b.addAction(Notification.Action.Builder(0, "Achievements", ov).build())
+            @Suppress("DEPRECATION")
+            b.addAction(Notification.Action.Builder(0, "Open app", app).build())
+        }
         if (sub != null) b.setSubText(sub)
         return b.build()
     }
@@ -204,6 +240,7 @@ class EngineService : Service() {
         var gameLoaded = false
         var nextHdr = 0L
         var nextPhrase = 0L
+        var nextList = 0L
         val period = 1_000_000_000L / 60
         var next = System.nanoTime()
         AppLog.setStatus("Waiting for DraStic...", true)
@@ -226,6 +263,7 @@ class EngineService : Service() {
                 val same = current != null && java.util.Arrays.equals(current, hdr.copyOf(16))
                 if (r == 1 && !same) {
                     playStop()
+                    LiveGame.clear()
                     if (gameLoaded) {
                         Native.unload()
                         gameLoaded = false
@@ -237,10 +275,12 @@ class EngineService : Service() {
                     if (!gameLoaded) AppLog.setStatus("Waiting for DraStic...", true)
                 } else if (r == 0 && current != null) {
                     playStop()
+                    LiveGame.clear()
                     if (gameLoaded) Native.unload()
                     gameLoaded = false
                     current = null
                     gameTitle = ""
+                    rotatePhrase()
                     AppLog.setStatus("Waiting for DraStic...", true)
                 }
             }
@@ -248,6 +288,15 @@ class EngineService : Service() {
             if (gameLoaded) {
                 Native.doFrame()
                 pump()
+                // live achievement list for the overlay: often while it is open, rarely otherwise
+                if (LiveGame.refreshWanted || now >= nextList) {
+                    LiveGame.refreshWanted = false
+                    try {
+                        LiveGame.setFromNative(Native.achievementList())
+                    } catch (_: Throwable) {
+                    }
+                    nextList = now + (if (GameOverlay.showing) 1500L else 8000L)
+                }
                 next += period
                 val sleepNs = next - System.nanoTime()
                 if (sleepNs > 0) {
@@ -373,6 +422,8 @@ class EngineService : Service() {
                 playId = p.getOrElse(7) { "0" }.toIntOrNull() ?: 0
                 playLast = SystemClock.elapsedRealtime()
                 playFlushAt = playLast
+                LiveGame.begin(playId, t, p.getOrElse(6) { "" })
+                rotatePhrase()
                 AppLog.add("Game: $t - $got / $total achievements ($pts / $ptsTotal pts)")
                 AppLog.setStatus("Watching: $t", true)
                 popup.game(t, p.getOrElse(6) { "" }, got, total, "$pts / $ptsTotal pts")
@@ -388,9 +439,13 @@ class EngineService : Service() {
                 val ptsN = pts.toIntOrNull() ?: 0
                 Unseen.add(this, UnseenItem(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, ptsN, p.getOrElse(4) { "" }, gameTitle))
                 if (totalPoints > 0) totalPoints += ptsN
+                LiveGame.refreshWanted = true
                 popup.unlock(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, pts, p.getOrElse(4) { "" }, gameTitle, totalPoints)
             }
-            "PROGRESS" -> popup.progress(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" })
+            "PROGRESS" -> {
+                LiveGame.refreshWanted = true
+                popup.progress(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, p.getOrElse(3) { "" })
+            }
             "MASTERED" -> {
                 AppLog.add("Game mastered!")
                 popup.mastered()
@@ -408,6 +463,8 @@ class EngineService : Service() {
             playStop()
         } catch (_: Throwable) {
         }
+        LiveGame.clear()
+        android.os.Handler(android.os.Looper.getMainLooper()).post { GameOverlay.hide() }
         try {
             if (nativeReady) Native.shutdown()
         } catch (_: Throwable) {

@@ -15,9 +15,13 @@ import android.widget.TextView
 class GameDetailView(private val act: MainActivity, private val game: RaGame, private val onClose: () -> Unit) : FrameLayout(act) {
     private var detail: RaGameDetail? = null
     private var filter = 0
+    /** title bar + progress card + filter chips: they dissolve together while the list scrolls over them */
+    private val topBlock = LinearLayout(act)
     private val header = LinearLayout(act)
     private val chips = LinearLayout(act)
     private val list = LinearLayout(act)
+    private val sv = ScrollView(act)
+    private val backBtn: View
     private var closing = false
 
     init {
@@ -25,11 +29,16 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
         col.orientation = LinearLayout.VERTICAL
         act.pad(col, 16, 12, 16, 12)
         col.clipChildren = false
+        col.clipToPadding = false
+        topBlock.orientation = LinearLayout.VERTICAL
+        topBlock.clipChildren = false
+        topBlock.clipToPadding = false
 
         val top = LinearLayout(act)
         top.orientation = LinearLayout.HORIZONTAL
         top.gravity = Gravity.CENTER_VERTICAL
-        top.addView(act.iconButton(R.drawable.ic_back, 46) { close() }, act.ll(act.dp(46), act.dp(46), r = 10))
+        backBtn = act.iconButton(R.drawable.ic_back, 46) { close() }
+        top.addView(backBtn, act.ll(act.dp(46), act.dp(46), r = 10))
         val tp = act.card(26)
         tp.orientation = LinearLayout.HORIZONTAL
         tp.gravity = Gravity.CENTER_VERTICAL
@@ -40,22 +49,29 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
         tp.addView(tt, act.ll(0, WRAP, 1f, r = 8))
         tp.addView(act.tag(shortConsole(game.console)))
         top.addView(tp, act.ll(0, WRAP, 1f))
-        col.addView(top, act.ll(MATCH, WRAP))
+        topBlock.addView(top, act.ll(MATCH, WRAP))
 
         header.orientation = LinearLayout.VERTICAL
-        col.addView(header, act.ll(MATCH, WRAP, t = 12))
+        topBlock.addView(header, act.ll(MATCH, WRAP, t = 12))
 
         chips.orientation = LinearLayout.HORIZONTAL
-        col.addView(chips, act.ll(MATCH, WRAP, t = 12))
+        chips.clipChildren = false
+        topBlock.addView(chips, act.ll(MATCH, WRAP, t = 12))
+        col.addView(topBlock, act.ll(MATCH, WRAP))
 
-        val sv = ScrollView(act)
         sv.isVerticalScrollBarEnabled = false
+        sv.isFocusable = false
         sv.clipToPadding = false
+        // like the home screen, rows slide up over the (fading) header instead of being cut off under it
+        sv.clipChildren = false
         list.orientation = LinearLayout.VERTICAL
         list.clipChildren = false
         act.pad(list, 2, 8, 2, 16)
         sv.addView(list)
-        sv.setOnScrollChangeListener { _, _, _, _, _ -> GlassBackdrop.invalidateAll() }
+        sv.setOnScrollChangeListener { _, _, y, _, _ ->
+            GlassBackdrop.invalidateAll()
+            updateHeaderFade(y)
+        }
         col.addView(sv, act.ll(MATCH, 0, 1f))
         addView(col, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
@@ -64,10 +80,31 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
         load()
     }
 
+    /**
+     * Same behaviour as the home screen: the game name, progress card and chips dissolve over the first ~64dp of
+     * scrolling so achievement rows never slide over a half see-through header. Fully gone = INVISIBLE (not focusable).
+     */
+    private fun updateHeaderFade(scrollY: Int) {
+        val t = (scrollY / act.dp(64).toFloat()).coerceIn(0f, 1f)
+        val k = t * t * (3f - 2f * t)
+        topBlock.alpha = 1f - k
+        topBlock.translationY = -k * act.dp(12)
+        topBlock.visibility = if (t >= 1f) View.INVISIBLE else View.VISIBLE
+    }
+
     fun slideIn() {
         alpha = 0f
         translationX = act.dp(60).toFloat()
         animate().alpha(1f).translationX(0f).setDuration(320).setInterpolator(DecelerateInterpolator(1.6f)).start()
+        post { backBtn.requestFocus() }
+    }
+
+    /** L1 / R1 on a controller: previous / next filter (All, Unlocked, Locked). */
+    fun cycleFilter(step: Int) {
+        if (detail == null) return
+        filter = (filter + step + 3) % 3
+        renderChips(true)
+        renderList()
     }
 
     private fun load() {
@@ -84,7 +121,8 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
                 act.runOnUiThread {
                     detail = d
                     renderHeader()
-                    renderChips()
+                    // focus the filter chips once there is something to pick (unless the user already moved on)
+                    renderChips(backBtn.isFocused)
                     renderList()
                 }
             } catch (e: Exception) {
@@ -121,21 +159,26 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
         c.popIn(0)
     }
 
-    private fun renderChips() {
+    private fun renderChips(focusSelected: Boolean = false) {
+        val hadFocus = chips.findFocus() != null
         chips.removeAllViews()
         val names = arrayOf("All", "Unlocked", "Locked")
         for (i in names.indices) {
             chips.addView(act.chip(names[i], filter == i) {
                 filter = i
-                renderChips()
+                renderChips(true)
                 renderList()
             }, act.ll(0, WRAP, 1f, l = if (i == 0) 0 else 8))
         }
+        // the chip that had focus was just replaced: keep the controller highlight on the selected one
+        if (focusSelected || hadFocus) chips.getChildAt(filter)?.let { c -> c.post { c.requestFocus() } }
     }
 
     private fun renderList() {
         val d = detail ?: return
         list.removeAllViews()
+        sv.scrollTo(0, 0)
+        sv.post { updateHeaderFade(sv.scrollY) }
         var n = 0
         for (a in d.list) {
             if (filter == 1 && !a.earned) continue
