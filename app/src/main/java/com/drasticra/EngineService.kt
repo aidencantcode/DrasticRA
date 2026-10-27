@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Environment
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import java.io.DataInputStream
 import java.io.File
 import java.io.FileInputStream
@@ -40,6 +41,14 @@ class EngineService : Service() {
     @Volatile private var gameState = 0
     @Volatile private var gameTitle = ""
     @Volatile private var totalPoints = 0
+
+    // play time: engine thread only. Counts while a known game is loaded AND DraStic is on screen.
+    private var playId = 0
+    private var playLast = 0L
+    private var playPending = 0L
+    private var playFlushAt = 0L
+    private var visible = true
+    private var channelMade = false
     private var phraseIdx = 0
     private val phrases = arrayOf(
         "Peeping at your memory",
@@ -92,9 +101,34 @@ class EngineService : Service() {
         super.onDestroy()
     }
 
+    private fun playTick(loaded: Boolean) {
+        val now = SystemClock.elapsedRealtime()
+        val dt = now - playLast
+        playLast = now
+        if (loaded && playId != 0 && visible && dt in 1L..5000L) playPending += dt
+        if (playPending > 0 && now - playFlushAt >= 15000) playFlush()
+    }
+
+    private fun playFlush() {
+        playFlushAt = SystemClock.elapsedRealtime()
+        if (playId == 0 || playPending <= 0) return
+        val sp = getSharedPreferences("dsra", MODE_PRIVATE)
+        val key = "play_ms_$playId"
+        sp.edit().putLong(key, sp.getLong(key, 0L) + playPending).apply()
+        playPending = 0
+    }
+
+    private fun playStop() {
+        playFlush()
+        playId = 0
+    }
+
     private fun notification(text: String, sub: String?): Notification {
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel("dsra", "Drastic RA", NotificationManager.IMPORTANCE_LOW))
+        if (!channelMade) {
+            nm.createNotificationChannel(NotificationChannel("dsra", "Drastic RA", NotificationManager.IMPORTANCE_LOW))
+            channelMade = true
+        }
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val b = Notification.Builder(this, "dsra")
             .setContentTitle("Drastic RA")
@@ -187,8 +221,11 @@ class EngineService : Service() {
                     break
                 }
                 nextHdr = now + (if (gameLoaded) 2000 else 3000)
+                // the root helper stores "is DraStic on screen" in the last header byte (see RootServer)
+                if (r == 1) visible = hdr[0x1FF].toInt() != 2
                 val same = current != null && java.util.Arrays.equals(current, hdr.copyOf(16))
                 if (r == 1 && !same) {
+                    playStop()
                     if (gameLoaded) {
                         Native.unload()
                         gameLoaded = false
@@ -199,6 +236,7 @@ class EngineService : Service() {
                     next = System.nanoTime()
                     if (!gameLoaded) AppLog.setStatus("Waiting for DraStic...", true)
                 } else if (r == 0 && current != null) {
+                    playStop()
                     if (gameLoaded) Native.unload()
                     gameLoaded = false
                     current = null
@@ -206,6 +244,7 @@ class EngineService : Service() {
                     AppLog.setStatus("Waiting for DraStic...", true)
                 }
             }
+            playTick(gameLoaded)
             if (gameLoaded) {
                 Native.doFrame()
                 pump()
@@ -329,6 +368,11 @@ class EngineService : Service() {
                 val ptsTotal = p.getOrElse(4) { "0" }
                 val pts = p.getOrElse(5) { "0" }
                 gameTitle = t
+                // start timing this game (RetroAchievements game id is the 8th field)
+                playStop()
+                playId = p.getOrElse(7) { "0" }.toIntOrNull() ?: 0
+                playLast = SystemClock.elapsedRealtime()
+                playFlushAt = playLast
                 AppLog.add("Game: $t - $got / $total achievements ($pts / $ptsTotal pts)")
                 AppLog.setStatus("Watching: $t", true)
                 popup.game(t, p.getOrElse(6) { "" }, got, total, "$pts / $ptsTotal pts")
@@ -360,6 +404,10 @@ class EngineService : Service() {
     }
 
     private fun cleanup() {
+        try {
+            playStop()
+        } catch (_: Throwable) {
+        }
         try {
             if (nativeReady) Native.shutdown()
         } catch (_: Throwable) {

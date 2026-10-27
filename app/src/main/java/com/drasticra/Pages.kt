@@ -78,11 +78,15 @@ internal fun MainActivity.buildMenu(col: LinearLayout) {
     col.addView(tv("L1 / R1 switch tabs  -  START opens this  -  B goes back", 11f, Pal.SUB), ll(WRAP, WRAP, t = 2, b = 6))
     val user = prefs.getString("user_ra", "") ?: ""
     val loggedIn = (prefs.getString("token", "") ?: "").isNotEmpty() && user.isNotEmpty()
-    val gm = when (glassMode()) {
+    fun glassName(m: String) = when (m) {
         "off" -> "Off"
         "lite" -> "Lite"
-        else -> "Full refraction"
+        else -> "Full"
     }
+    val uiGlass = glassMode()
+    val popGlass = popupGlassMode()
+    val gm = if (popGlass == uiGlass) "UI and popups: " + glassName(uiGlass)
+    else "UI: " + glassName(uiGlass) + "  -  Popups: " + glassName(popGlass)
     val style = prefs.getString("bg_style", "aurora") ?: "aurora"
     val preset = BgPresets.all.firstOrNull { it.style == style }?.label ?: "Aurora"
     val mediaType = prefs.getString("bg_type", "anim") ?: "anim"
@@ -182,7 +186,7 @@ internal fun MainActivity.buildLibraryPage(col: LinearLayout) {
     bindPref(pkgIn, "pkg")
     lc.addView(folderIn, ll(MATCH, WRAP, t = 12))
     lc.addView(pkgIn, ll(MATCH, WRAP, t = 8))
-    lc.addView(tv("Home screen shows", 12f, Pal.SUB, true), ll(WRAP, WRAP, t = 14))
+    lc.addView(tv("Earned and Completion show", 12f, Pal.SUB, true), ll(WRAP, WRAP, t = 14))
     val ds = prefs.getBoolean("ds_only", false)
     lc.addView(rowOf(
         chip("All games", !ds) {
@@ -196,12 +200,13 @@ internal fun MainActivity.buildLibraryPage(col: LinearLayout) {
             showPage("library", false)
         }
     ), ll(MATCH, WRAP, t = 8))
+    lc.addView(tv("Recent always shows Nintendo DS games only.", 11f, Pal.SUB), ll(WRAP, WRAP, t = 8))
     col.addView(lc, ll(MATCH, WRAP))
 }
 
 // ---------- glass ----------
 internal fun MainActivity.buildGlassPage(col: LinearLayout) {
-    val gc = sectionCard("GLASS MATERIAL")
+    val gc = sectionCard("MENU, HOME AND UI GLASS")
     val mode = glassMode()
     gc.addView(rowOf(
         chip("Off", mode == "off") { prefs.edit().putString("glass_mode", "off").apply(); recreate() },
@@ -220,6 +225,21 @@ internal fun MainActivity.buildGlassPage(col: LinearLayout) {
         chip("Strong", st == "strong") { prefs.edit().putString("glass_strength", "strong").apply(); recreate() }
     ), ll(MATCH, WRAP, t = 8))
     col.addView(gc, ll(MATCH, WRAP))
+
+    // popups get their own material, so they can be Full while the rest of the app stays Lite (or the reverse)
+    val pcard = sectionCard("POPUP GLASS")
+    val pg = prefs.getString("popup_glass", "same") ?: "same"
+    pcard.addView(rowOf(
+        chip("Same", pg != "off" && pg != "lite" && pg != "full") { prefs.edit().putString("popup_glass", "same").apply(); showPage("glass", false) },
+        chip("Off", pg == "off") { prefs.edit().putString("popup_glass", "off").apply(); showPage("glass", false) },
+        chip("Lite", pg == "lite") { prefs.edit().putString("popup_glass", "lite").apply(); showPage("glass", false) },
+        chip("Full", pg == "full") { prefs.edit().putString("popup_glass", "full").apply(); showPage("glass", false) }
+    ), ll(MATCH, WRAP, t = 12))
+    pcard.addView(tv(
+        "Only affects achievement popups over your game. Same follows the setting above. Full bends the live game " +
+            "screen behind the popup (needs the root screenshot in Popups). Changes apply to the next popup.", 11f, Pal.SUB
+    ), ll(WRAP, WRAP, t = 10))
+    col.addView(pcard, ll(MATCH, WRAP, t = 12))
 }
 
 // ---------- animations ----------

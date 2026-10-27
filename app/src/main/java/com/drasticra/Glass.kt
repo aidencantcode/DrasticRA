@@ -61,8 +61,20 @@ half4 main(float2 fc) {
  */
 object GlassBackdrop {
     var source: View? = null
+
+    /**
+     * The sliding settings drawer. Glass inside it samples the background as if the drawer were already at
+     * rest, so it never shows black while it is parked off-screen or sliding in, and it is not re-recorded
+     * every tick while the drawer is closed.
+     */
+    var drawer: View? = null
     private var node: RenderNode? = null
     private val views = ArrayList<WeakReference<GlassLinear>>()
+
+    private fun drawerHidden(): Boolean {
+        val d = drawer ?: return false
+        return d.width > 0 && d.translationX <= -d.width + 1f
+    }
 
     fun register(v: GlassLinear) {
         views.add(WeakReference(v))
@@ -96,10 +108,11 @@ object GlassBackdrop {
     }
 
     fun invalidateAll() {
+        val hidden = drawerHidden()
         val it = views.iterator()
         while (it.hasNext()) {
             val v = it.next().get()
-            if (v == null) it.remove() else if (v.isShown) v.invalidate()
+            if (v == null) it.remove() else if (v.isShown && !(hidden && v.inDrawer)) v.invalidate()
         }
     }
 
@@ -117,13 +130,22 @@ object GlassBackdrop {
         val b = IntArray(2)
         v.getLocationInWindow(a)
         s.getLocationInWindow(b)
+        // glass in the drawer: pretend the drawer is already open, whatever it is doing right now
+        val dv = drawer
+        if (dv != null && v is GlassLinear && v.inDrawer) a[0] -= dv.translationX.toInt()
         c.translate((b[0] - a[0]).toFloat(), (b[1] - a[1]).toFloat())
         c.drawRenderNode(n)
     }
 }
 
-/** A LinearLayout with a liquid-glass material behind its children. */
-class GlassLinear(ctx: Context) : LinearLayout(ctx) {
+/**
+ * A LinearLayout with a liquid-glass material behind its children.
+ * [modeOverride] ("off" / "lite" / "full") lets one view (the popups) use a different material than the UI.
+ */
+class GlassLinear(ctx: Context, modeOverride: String? = null) : LinearLayout(ctx) {
+    /** true when this view lives inside the settings drawer (worked out when it is attached) */
+    var inDrawer = false
+        private set
     var radiusDp = 26
         set(v) {
             field = v
@@ -137,7 +159,7 @@ class GlassLinear(ctx: Context) : LinearLayout(ctx) {
     var frostBottom = Pal.CARD_B
     var provider: ((Canvas, View) -> Unit)? = null
 
-    private val mode: String = ctx.glassMode()
+    private val mode: String = modeOverride ?: ctx.glassMode()
     private val path = Path()
     private val rect = RectF()
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -146,6 +168,10 @@ class GlassLinear(ctx: Context) : LinearLayout(ctx) {
     private var node: RenderNode? = null
     private var agsl: RuntimeShader? = null
     private var failed = false
+    private var effectSet = false
+    private var effW = 0
+    private var effH = 0
+    private var effR = 0f
     private var rpx = 0f
     private val strength: Float
     private val blurPx: Float
@@ -217,6 +243,18 @@ class GlassLinear(ctx: Context) : LinearLayout(ctx) {
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        inDrawer = false
+        val dv = GlassBackdrop.drawer
+        if (dv != null) {
+            var p = parent
+            while (p != null) {
+                if (p === dv) {
+                    inDrawer = true
+                    break
+                }
+                p = p.parent
+            }
+        }
         if (mode == "full") GlassBackdrop.register(this)
     }
 
@@ -271,23 +309,30 @@ class GlassLinear(ctx: Context) : LinearLayout(ctx) {
             } finally {
                 n.endRecording()
             }
-            val blur = RenderEffect.createBlurEffect(blurPx, blurPx, Shader.TileMode.CLAMP)
-            var effect: RenderEffect = blur
-            if (!failed) {
-                try {
-                    val sh = agsl ?: RuntimeShader(AGSL).also { agsl = it }
-                    val md = min(w, h).toFloat()
-                    sh.setFloatUniform("size", w.toFloat(), h.toFloat())
-                    sh.setFloatUniform("radius", rpx)
-                    sh.setFloatUniform("bevel", max(1f, min(context.dp(26).toFloat(), md * 0.45f)))
-                    sh.setFloatUniform("refr", min(context.dp(16).toFloat() * strength, md * 0.35f))
-                    sh.setFloatUniform("disp", 0.09f)
-                    effect = RenderEffect.createChainEffect(RenderEffect.createRuntimeShaderEffect(sh, "content"), blur)
-                } catch (e: Throwable) {
-                    failed = true
+            // the effect only depends on the size and corner radius, so build it once and reuse it every frame
+            if (!effectSet || effW != w || effH != h || effR != rpx) {
+                val blur = RenderEffect.createBlurEffect(blurPx, blurPx, Shader.TileMode.CLAMP)
+                var effect: RenderEffect = blur
+                if (!failed) {
+                    try {
+                        val sh = agsl ?: RuntimeShader(AGSL).also { agsl = it }
+                        val md = min(w, h).toFloat()
+                        sh.setFloatUniform("size", w.toFloat(), h.toFloat())
+                        sh.setFloatUniform("radius", rpx)
+                        sh.setFloatUniform("bevel", max(1f, min(context.dp(26).toFloat(), md * 0.45f)))
+                        sh.setFloatUniform("refr", min(context.dp(16).toFloat() * strength, md * 0.35f))
+                        sh.setFloatUniform("disp", 0.09f)
+                        effect = RenderEffect.createChainEffect(RenderEffect.createRuntimeShaderEffect(sh, "content"), blur)
+                    } catch (e: Throwable) {
+                        failed = true
+                    }
                 }
+                n.setRenderEffect(effect)
+                effectSet = true
+                effW = w
+                effH = h
+                effR = rpx
             }
-            n.setRenderEffect(effect)
             c.drawRenderNode(n)
             return true
         } catch (e: Throwable) {

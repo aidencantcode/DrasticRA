@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Point
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
@@ -109,11 +110,12 @@ private fun lightenC(c: Int, t: Float): Int = Color.rgb(
  * the screen. It lives in its own full-screen, touch-through window behind the popup (so it can never
  * change the popup's size), flashes when a popup appears, breathes while it is up, and fades with [fadeOut].
  */
-class EdgeGlowView(ctx: Context) : View(ctx) {
+class EdgeGlowView(ctx: Context, private val dispW: Int, private val dispH: Int) : View(ctx) {
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val maskPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val m = Matrix()
     private val dst = RectF()
+    private val loc = IntArray(2)
     private var sweep: SweepGradient? = null
     private var mask: Bitmap? = null
     private val bornAt = SystemClock.uptimeMillis()
@@ -122,6 +124,14 @@ class EdgeGlowView(ctx: Context) : View(ctx) {
 
     init {
         maskPaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        // the glow is measured against the real display (not this window), so it hugs every edge of the screen
+        // including the bottom, whatever size the system decided to give the overlay window
+        mask = buildMask(dispW, dispH)
+        sweep = SweepGradient(
+            0f, 0f,
+            intArrayOf(Pal.ACC1, Pal.ACC2, lightenC(Pal.ACC2, 0.55f), Pal.ACC2, Pal.ACC1),
+            floatArrayOf(0f, 0.3f, 0.5f, 0.75f, 1f)
+        )
     }
 
     fun flash() {
@@ -132,18 +142,6 @@ class EdgeGlowView(ctx: Context) : View(ctx) {
     fun fadeOut() {
         if (closeAt == 0L) closeAt = SystemClock.uptimeMillis()
         invalidate()
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        super.onSizeChanged(w, h, ow, oh)
-        if (w <= 0 || h <= 0) return
-        sweep = SweepGradient(
-            w / 2f, h / 2f,
-            intArrayOf(Pal.ACC1, Pal.ACC2, lightenC(Pal.ACC2, 0.55f), Pal.ACC2, Pal.ACC1),
-            floatArrayOf(0f, 0.3f, 0.5f, 0.75f, 1f)
-        )
-        mask = buildMask(w, h)
-        dst.set(0f, 0f, w.toFloat(), h.toFloat())
     }
 
     /** Small alpha-only picture: strongest right at the screen edge, melting away ~35dp inwards. */
@@ -181,11 +179,15 @@ class EdgeGlowView(ctx: Context) : View(ctx) {
 
         val w = width.toFloat()
         val h = height.toFloat()
-        m.setRotate((now % 6000L) / 6000f * 360f, w / 2f, h / 2f)
+        // where the real display sits relative to this view (normally 0,0 - but never assume it)
+        getLocationOnScreen(loc)
+        dst.set(-loc[0].toFloat(), -loc[1].toFloat(), dispW - loc[0].toFloat(), dispH - loc[1].toFloat())
+        m.setRotate((now % 6000L) / 6000f * 360f)
+        m.postTranslate(dst.centerX(), dst.centerY())
         s.setLocalMatrix(m)
         fill.shader = s
         val sc = c.saveLayerAlpha(0f, 0f, w, h, (255f * k).toInt())
-        c.drawRect(0f, 0f, w, h, fill)
+        c.drawRect(dst, fill)
         c.drawBitmap(bm, null, dst, maskPaint)
         c.restoreToCount(sc)
         if (outK > 0f) postInvalidateOnAnimation()
@@ -217,11 +219,34 @@ class Popup(private val ctx: Context) {
 
     private fun fmt(n: Int): String = String.format("%,d", n)
 
-    /** Full-screen, touch-through window for the edge glow. Alpha stays <= 0.8 so Android 12+ lets touches reach the game. */
-    private fun edgeParams(): WindowManager.LayoutParams {
+    /** The whole display in pixels, system bars and cutouts included (the window manager's "maximum" bounds). */
+    private fun displaySize(): Point {
+        val p = Point()
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                val b = wm().maximumWindowMetrics.bounds
+                p.set(b.width(), b.height())
+            } else {
+                @Suppress("DEPRECATION")
+                wm().defaultDisplay.getRealSize(p)
+            }
+        } catch (_: Throwable) {
+        }
+        if (p.x <= 0 || p.y <= 0) {
+            val dm = ctx.resources.displayMetrics
+            p.set(dm.widthPixels, dm.heightPixels)
+        }
+        return p
+    }
+
+    /**
+     * Touch-through window exactly as big as the display, allowed to cover the status bar, navigation bar and
+     * cutout, so the glow reaches every edge. Alpha stays <= 0.8 so Android 12+ lets touches reach the game.
+     */
+    private fun edgeParams(size: Point): WindowManager.LayoutParams {
         val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            size.x,
+            size.y,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -229,8 +254,13 @@ class Popup(private val ctx: Context) {
             PixelFormat.TRANSLUCENT
         )
         lp.gravity = Gravity.TOP or Gravity.START
+        lp.x = 0
+        lp.y = 0
         lp.alpha = 0.78f
-        if (Build.VERSION.SDK_INT >= 28) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            lp.setFitInsetsTypes(0)
+        } else if (Build.VERSION.SDK_INT >= 28) {
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
         return lp
@@ -238,8 +268,9 @@ class Popup(private val ctx: Context) {
 
     private fun addEdge(): EdgeGlowView? {
         return try {
-            val e = EdgeGlowView(ctx)
-            wm().addView(e, edgeParams())
+            val size = displaySize()
+            val e = EdgeGlowView(ctx, size.x, size.y)
+            wm().addView(e, edgeParams(size))
             currentEdge = e
             e
         } catch (_: Exception) {
@@ -313,8 +344,9 @@ class Popup(private val ctx: Context) {
             ui.postDelayed({ next() }, 400)
             return
         }
-        val capture = ctx.glassMode() != "off" && ctx.prefs().getBoolean("popup_capture", true)
+        val capture = ctx.popupGlassMode() != "off" && ctx.prefs().getBoolean("popup_capture", true)
         Thread {
+            // popups that follow each other reuse one grab taken in the last 1.5 s (a root screencap is not free)
             val bmp = if (capture) ScreenGrab.capture(1500L) else null
             ui.post { present(d, bmp) }
         }.start()
@@ -324,7 +356,8 @@ class Popup(private val ctx: Context) {
         try {
             Pal.load(ctx)
             Fonts.load(ctx)
-            val top = (ctx.prefs().getString("popup_pos", "top") ?: "top") != "bottom"
+            Img.init(ctx)
+            val top =(ctx.prefs().getString("popup_pos", "top") ?: "top") != "bottom"
             val pop = build(d, bmp, top)
             // edge glow goes in first so the popup window sits above it
             val edge = addEdge()
@@ -401,7 +434,10 @@ class Popup(private val ctx: Context) {
 
     private fun build(d: Data, bmp: Bitmap?, top: Boolean): Pop {
         val dm = ctx.resources.displayMetrics
-        val mode = ctx.glassMode()
+        // popups have their own glass setting. Full refraction needs the game screenshot; without one the popup
+        // falls back to frosted glass instead of sampling the app's own (stale, other-window) background.
+        val picked = ctx.popupGlassMode()
+        val mode = if (picked == "full" && bmp == null) "lite" else picked
         // pick readable text colour from what is actually behind the popup
         var lightScene = mode != "off" && bmp == null
         if (bmp != null) {
@@ -428,7 +464,7 @@ class Popup(private val ctx: Context) {
             bg.cornerRadius = ctx.dp(34).toFloat()
             glass.background = bg
         } else {
-            val g = GlassLinear(ctx)
+            val g = GlassLinear(ctx, mode)
             g.radiusDp = 34
             g.band = true
             if (lightScene) {

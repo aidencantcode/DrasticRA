@@ -48,7 +48,7 @@ object Ra {
     }
 
     fun summary(user: String, key: String): String =
-        api("API_GetUserSummary.php", user, key, "&g=30&a=50")
+        api("API_GetUserSummary.php", user, key, "&g=50&a=50")
 
     fun earnedAllText(user: String, key: String): String =
         api("API_GetAchievementsEarnedBetween.php", user, key, "&f=0&t=" + (System.currentTimeMillis() / 1000L))

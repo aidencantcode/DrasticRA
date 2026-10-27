@@ -16,6 +16,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.Choreographer
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -36,6 +37,11 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : Activity() {
+    companion object {
+        /** true once the app has fully started in this process (later re-creates only show a short veil) */
+        @Volatile var warmedOnce = false
+    }
+
     internal lateinit var root: FrameLayout
     internal lateinit var bg: BackgroundHost
     private lateinit var mainLayer: LinearLayout
@@ -68,6 +74,9 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private var tab = 0
     private var grid = true
+
+    private var playSig = 0L
+    private var lastRefresh = 0L
 
     private var home: RaHome? = null
     private var earnedAll: List<RaAch>? = null
@@ -102,6 +111,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         Pal.load(this)
         Fonts.load(this)
+        Img.init(this)
         if (Build.VERSION.SDK_INT >= 28) {
             val wlp = window.attributes
             wlp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -171,13 +181,55 @@ class MainActivity : Activity() {
 
         renderProfile()
         renderTab()
-        loadCaches()
         tickClock()
         topBar.popIn(0)
         tabsRow.popIn(70)
         bottomBar.popIn(140)
         val first = tabViews.getOrNull(tab)
         first?.post { first.requestFocus() }
+
+        // Loading screen: a glowing line and a hint while the cached data loads and the glass is warmed up.
+        // A full launch gets the hints; a quick re-create (theme / glass change) only gets a short veil.
+        if (drawerOpen) {
+            loadCaches()
+        } else {
+            val cold = !warmedOnce
+            val loader = LoadingView(this, cold)
+            root.addView(loader, FrameLayout.LayoutParams(MATCH, MATCH))
+            val gate = LoadingGate(loader, if (cold) 2200L else 450L) {
+                warmedOnce = true
+                first?.requestFocus()
+            }
+            prewarmGlass { gate.warmReady() }
+            loadCaches { gate.dataReady() }
+        }
+    }
+
+    /**
+     * Draws the whole settings drawer once, under the loading screen. The first time glass is drawn the GPU has to
+     * build its blur/refraction layers and compile the shader; doing that now means the drawer slides in smooth
+     * and fully formed later instead of flashing black.
+     */
+    private fun prewarmGlass(done: () -> Unit) {
+        if (glassMode() != "full" || Build.VERSION.SDK_INT < 33) {
+            done()
+            return
+        }
+        drawer.translationX = 0f
+        var frames = 0
+        val cb = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                GlassBackdrop.tick()
+                frames++
+                if (frames < 8) {
+                    Choreographer.getInstance().postFrameCallback(this)
+                } else {
+                    if (!drawerOpen) drawer.translationX = -drawerWidth.toFloat()
+                    done()
+                }
+            }
+        }
+        Choreographer.getInstance().postFrameCallback(cb)
     }
 
     private fun buildTopBar(): View {
@@ -376,7 +428,10 @@ class MainActivity : Activity() {
                 if (h == null) {
                     emptyMsg = "Log in and add your Web API key in Settings (menu button) to see your games."
                 } else {
-                    for (g in h.recent) if (!dsOnly || g.console.contains("DS")) cards.add(gameCard(g))
+                    // Recent is always Nintendo DS only (Earned and Completion keep the Library filter)
+                    for (g in h.recent) if (isDsConsole(g.console)) cards.add(gameCard(g, true))
+                    if (cards.isEmpty()) emptyMsg = "No Nintendo DS games in your recent list yet."
+                    playSig = computePlaySig()
                 }
             }
             1 -> {
@@ -426,7 +481,15 @@ class MainActivity : Activity() {
         GlassBackdrop.invalidateAll()
     }
 
-    private fun gameCard(g: RaGame): View {
+    /** Sum of tracked play minutes over the games on the Recent tab, so we know when its cards are out of date. */
+    private fun computePlaySig(): Long {
+        var s = 0L
+        val h = home ?: return 0L
+        for (g in h.recent) if (isDsConsole(g.console)) s += PlayTime.ms(this, g.id) / 60000L + 1L
+        return s
+    }
+
+    private fun gameCard(g: RaGame, showTime: Boolean = false): View {
         val c = card(26)
         val top = LinearLayout(this)
         top.orientation = LinearLayout.VERTICAL
@@ -439,7 +502,17 @@ class MainActivity : Activity() {
         val title = tv(g.title, 16f, Pal.TEXT, true)
         title.maxLines = 2
         title.ellipsize = TextUtils.TruncateAt.END
-        head.addView(title, ll(0, WRAP, 1f))
+        val titleCol = LinearLayout(this)
+        titleCol.orientation = LinearLayout.VERTICAL
+        titleCol.addView(title)
+        if (showTime) {
+            val pt = PlayTime.format(PlayTime.ms(this, g.id))
+            val line = if (pt.isEmpty()) tv("Play time: not tracked yet", 12f, Pal.SUB)
+            else tv("Played  $pt", 12f, Pal.ACC1, true)
+            line.maxLines = 1
+            titleCol.addView(line, ll(WRAP, WRAP, t = 3))
+        }
+        head.addView(titleCol, ll(0, WRAP, 1f))
         head.addView(tag(shortConsole(g.console)), ll(WRAP, WRAP, l = 8))
         top.addView(head)
 
@@ -560,7 +633,7 @@ class MainActivity : Activity() {
 
     internal fun apiKey(): String = prefs.getString("apikey", "") ?: ""
 
-    private fun loadCaches() {
+    private fun loadCaches(onLoaded: () -> Unit = {}) {
         Thread {
             val u = apiUser()
             try {
@@ -578,9 +651,15 @@ class MainActivity : Activity() {
                 if (c != null) completion = Ra.parseCompletion(c)
             } catch (_: Exception) {
             }
+            // warm the picture cache for the first screenful so icons are already there when the screen opens
+            home?.recent?.take(14)?.forEach { g ->
+                if (g.icon.isNotEmpty()) Img.prefetch(MEDIA + g.icon)
+                for (b in g.badges.take(4)) Img.prefetch("$MEDIA/Badge/$b.png")
+            }
             runOnUiThread {
                 renderProfile()
                 renderTab()
+                onLoaded()
             }
         }.start()
     }
@@ -598,8 +677,12 @@ class MainActivity : Activity() {
         renderTab()
     }
 
-    internal fun refreshAll() {
+    /** [force] = false (used when the app comes back to the front) skips the network if we refreshed a moment ago. */
+    internal fun refreshAll(force: Boolean = true) {
         if (!haveCreds()) return
+        val nowMs = android.os.SystemClock.elapsedRealtime()
+        if (!force && home != null && nowMs - lastRefresh < 20000L) return
+        lastRefresh = nowMs
         val u = apiUser()
         val k = apiKey()
         Thread {
@@ -672,6 +755,7 @@ class MainActivity : Activity() {
         drawer.elevation = dp(16).toFloat()
         root.addView(drawer, FrameLayout.LayoutParams(drawerWidth, MATCH))
         drawer.translationX = -drawerWidth.toFloat()
+        GlassBackdrop.drawer = drawer
 
         drawerCol = LinearLayout(this)
         drawerCol.orientation = LinearLayout.VERTICAL
@@ -739,6 +823,9 @@ class MainActivity : Activity() {
         if (drawerOpen) return
         drawerOpen = true
         mainLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        // glass in a closed drawer is not redrawn, so refresh it once before it slides into view
+        if (drawer.translationX <= -drawerWidth + 1f) drawer.translationX = -drawerWidth + 3f
+        GlassBackdrop.tick()
         drawerScrim.visibility = View.VISIBLE
         drawerScrim.animate().alpha(1f).setDuration(240).start()
         drawer.animate().translationX(0f).setDuration(340).setInterpolator(OvershootInterpolator(0.6f)).start()
@@ -872,7 +959,9 @@ class MainActivity : Activity() {
             }
         }
         AppLog.statusListener = { runOnUiThread { showStatus() } }
-        refreshAll()
+        refreshAll(false)
+        // the Recent cards show play time, which the watcher keeps updating while the app is in the background
+        if (tab == 0 && home != null && computePlaySig() != playSig) renderTab()
         val unseen = Unseen.take(this)
         if (unseen.isNotEmpty()) showCongrats(unseen)
     }
@@ -886,6 +975,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        if (GlassBackdrop.drawer === drawer) GlassBackdrop.drawer = null
         super.onDestroy()
     }
 

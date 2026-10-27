@@ -1,6 +1,7 @@
 package com.drasticra
 
 import java.io.DataInputStream
+import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.net.Socket
@@ -10,6 +11,10 @@ import java.net.Socket
  * Connects to the app over loopback and serves pieces of DraStic's DS main RAM.
  *   'H'            -> 1 status byte + 0x200 bytes (cartridge header copy from RAM)
  *   'P' n idx[n]   -> n * 4096 bytes (4 KiB pages of main RAM, in the order requested)
+ *
+ * The very last header byte (0x1FF) is not part of what the app checks, so the helper uses it to say whether
+ * DraStic is on screen right now: 0 = unknown, 1 = visible, 2 = hidden / in the background. That is how play
+ * time only counts while the game is really in front of you.
  */
 object RootServer {
     private const val PAGE = 4096
@@ -17,6 +22,19 @@ object RootServer {
     private var base = -1L
     private var mem: RandomAccessFile? = null
     private var lastLocate = 0L
+    private var procPid = -1
+
+    /** 1 = DraStic is on screen, 2 = it is in the background, 0 = could not tell. Cheap: reads one /proc file. */
+    private fun visibleFlag(): Int {
+        val p = procPid
+        if (p < 0) return 0
+        return try {
+            val adj = File("/proc/$p/oom_score_adj").readText().trim().toInt()
+            if (adj <= 100) 1 else 2
+        } catch (e: Exception) {
+            0
+        }
+    }
 
     @JvmStatic
     fun main(args: Array<String>) {
@@ -46,7 +64,10 @@ object RootServer {
                                 RootScan.looksLikeHeader(h, 0)
                         }
                     }
-                    if (ok) st = 1
+                    if (ok) {
+                        st = 1
+                        h[0x1FF] = visibleFlag().toByte()
+                    }
                     out.write(st)
                     out.write(h)
                     out.flush()
@@ -132,6 +153,7 @@ object RootServer {
                     if (RootScan.looksLikeHeader(buf, q)) {
                         base = r.start + off + q - RootScan.HDR_OFF
                         mem = m
+                        procPid = pid
                         println("RAM located at 0x" + java.lang.Long.toHexString(base))
                         return true
                     }

@@ -26,8 +26,17 @@ fun Int.withAlpha(a: Int): Int = (this and 0x00FFFFFF) or (a shl 24)
 
 fun Context.prefs(): android.content.SharedPreferences = getSharedPreferences("dsra", Context.MODE_PRIVATE)
 
+/** True for Nintendo DS / DSi games (RetroAchievements console names). */
+fun isDsConsole(c: String): Boolean = c.contains("Nintendo DS", ignoreCase = true)
+
 /** "full" = refraction glass, "lite" = frosted look without backdrop sampling, "off" = plain cards */
 fun Context.glassMode(): String = prefs().getString("glass_mode", "full") ?: "full"
+
+/** Popups can have their own glass material ("off" / "lite" / "full"); anything else (default "same") follows the UI glass. */
+fun Context.popupGlassMode(): String {
+    val v = prefs().getString("popup_glass", "same") ?: "same"
+    return if (v == "off" || v == "lite" || v == "full") v else glassMode()
+}
 
 object Pal {
     var light = true
@@ -157,12 +166,73 @@ fun Context.progressBar(pct: Int, heightDp: Int, gold: Boolean): LinearLayout {
     return row
 }
 
+/** Picture loader: memory cache first, then a copy on disk (instant + works offline on the next launch), then the network. */
 object Img {
     private val cache = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
     private val pool = Executors.newFixedThreadPool(4)
     private val ui = Handler(Looper.getMainLooper())
+    @Volatile private var dir: File? = null
+
+    /** Turns the disk copy on. Safe to call many times. */
+    fun init(ctx: Context) {
+        if (dir != null) return
+        val d = File(ctx.applicationContext.cacheDir, "img")
+        d.mkdirs()
+        dir = d
+        pool.execute { trim(d) }
+    }
+
+    private fun name(url: String): String =
+        java.security.MessageDigest.getInstance("MD5").digest(url.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    /** Keeps the disk copy under ~48 MB by dropping the least recently used files. */
+    private fun trim(d: File) {
+        try {
+            val files = d.listFiles() ?: return
+            var total = 0L
+            for (x in files) total += x.length()
+            if (total <= 48L * 1024 * 1024) return
+            for (x in files.sortedBy { it.lastModified() }) {
+                if (total <= 32L * 1024 * 1024) break
+                total -= x.length()
+                x.delete()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun fetch(url: String): Bitmap? {
+        val hit = cache.get(url)
+        if (hit != null) return hit
+        val d = dir
+        val f = if (d != null) File(d, name(url)) else null
+        if (f != null && f.length() > 0) {
+            val b = BitmapFactory.decodeFile(f.absolutePath)
+            if (b != null) {
+                f.setLastModified(System.currentTimeMillis())
+                cache.put(url, b)
+                return b
+            }
+            f.delete()
+        }
+        val c = URL(url).openConnection()
+        c.connectTimeout = 10000
+        c.readTimeout = 15000
+        val bytes = c.getInputStream().use { it.readBytes() }
+        val b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        cache.put(url, b)
+        if (f != null) {
+            try {
+                val tmp = File(f.parentFile, f.name + ".tmp")
+                tmp.writeBytes(bytes)
+                tmp.renameTo(f)
+            } catch (_: Exception) {
+            }
+        }
+        return b
+    }
 
     fun load(url: String, into: ImageView) {
         into.tag = url
@@ -173,13 +243,37 @@ object Img {
         }
         pool.execute {
             try {
-                val b = BitmapFactory.decodeStream(URL(url).openStream())
-                if (b != null) {
-                    cache.put(url, b)
-                    ui.post { if (into.tag == url) into.setImageBitmap(b) }
-                }
+                val b = fetch(url)
+                if (b != null) ui.post { if (into.tag == url) into.setImageBitmap(b) }
             } catch (_: Exception) {
             }
         }
+    }
+
+    /** Warm the caches for a picture that will be shown soon. */
+    fun prefetch(url: String) {
+        if (url.isEmpty() || cache.get(url) != null) return
+        pool.execute {
+            try {
+                fetch(url)
+            } catch (_: Exception) {
+            }
+        }
+    }
+}
+
+/** Play time per RetroAchievements game id, written by the engine while it watches DraStic. */
+object PlayTime {
+    fun ms(ctx: Context, gameId: Int): Long = if (gameId <= 0) 0L else ctx.prefs().getLong("play_ms_$gameId", 0L)
+
+    /** "<1m", "42m", "3h 05m", "120h"; empty when nothing has been tracked yet. */
+    fun format(ms: Long): String {
+        if (ms <= 0L) return ""
+        val min = ms / 60000L
+        if (min < 1L) return "<1m"
+        if (min < 60L) return min.toString() + "m"
+        val h = min / 60L
+        val m = min % 60L
+        return if (h >= 100L || m == 0L) h.toString() + "h" else h.toString() + "h " + String.format("%02d", m) + "m"
     }
 }
