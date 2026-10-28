@@ -27,8 +27,12 @@ import kotlin.math.sin
  */
 object Foil {
     val styles = listOf(
-        "cd" to "CD", "stars" to "Stars", "shapes" to "Shapes", "dots" to "Dots",
+        "foil" to "Foil", "cd" to "Coil", "stars" to "Stars", "shapes" to "Shapes", "dots" to "Dots",
         "cards" to "Cards", "candy" to "Candy wrapper", "patterns" to "Patterns"
+    )
+    /** shader branch of each style (fixed, so the menu order can change freely) */
+    private val shaderIndex = mapOf(
+        "cd" to 0f, "stars" to 1f, "shapes" to 2f, "dots" to 3f, "cards" to 4f, "candy" to 5f, "patterns" to 6f, "foil" to 7f
     )
     val tints = listOf(
         "none" to "Rainbow", "accent" to "Accent", "gold" to "Gold", "silver" to "Silver",
@@ -39,7 +43,7 @@ object Foil {
     var ui = true
     var popup = true
     var overlay = true
-    var style = "cd"
+    var style = "foil"
     var opacity = 0.45f
     var scale = 1f
     var tint = "none"
@@ -56,7 +60,7 @@ object Foil {
         ui = p.getBoolean("foil_ui", true)
         popup = p.getBoolean("foil_popup", true)
         overlay = p.getBoolean("foil_overlay", true)
-        style = p.getString("foil_style", "cd") ?: "cd"
+        style = p.getString("foil_style", "foil") ?: "foil"
         opacity = p.getInt("foil_opacity", 45) / 100f
         scale = p.getInt("foil_scale", 100) / 100f
         tint = p.getString("foil_tint", "none") ?: "none"
@@ -76,7 +80,7 @@ object Foil {
         else -> false
     }
 
-    fun styleIndex(): Float = styles.indexOfFirst { it.first == style }.coerceAtLeast(0).toFloat()
+    fun styleIndex(): Float = shaderIndex[style] ?: 7f
 
     fun tintColor(): Int = when (tint) {
         "accent" -> Pal.ACC1
@@ -292,6 +296,20 @@ half4 main(float2 fc) {
         float facet = pow(clamp(0.5 + dot(nrm, normalize(float2(0.6, 0.8) + tl * 0.5)) * 0.6, 0.0, 1.0), 3.0);
         mask = 0.55 + 0.45 * facet;
         spark = facet * 0.5;
+    } else if (style > 6.5) {
+        // Foil: big soft rainbow bands under a fine glitter grain whose sparkles twinkle as it tilts
+        float2 q = sp / 260.0;
+        float2 w = float2(fbm(q * 0.9 + float2(tl.x * 0.35, tl.y * 0.25) + time * 0.015),
+                          fbm(q * 0.9 + float2(5.2, 1.3) - time * 0.012));
+        float n = fbm(q + w * 1.25);
+        phase = n * 1.5 + (uv.x * 0.55 + uv.y * 0.3) + tl.x * 0.45 + tl.y * 0.25;
+        float2 cell = floor(sp * 1.15);
+        float gh = hash21(cell);
+        float gh2 = hash21(cell + 17.3);
+        // soft grain (not static): small cell-to-cell variation, plus a few bright twinkles
+        float tw = pow(fract(gh * 7.31 + time * 0.35 + dot(tl, float2(2.7, 1.9)) + gh2), 26.0);
+        spark = tw * (gh2 > 0.86 ? 2.2 : 0.0);
+        mask = 0.90 + 0.10 * gh;
     } else {
         // Patterns: soft liquid pastel swirls
         float2 q = sp / 160.0;

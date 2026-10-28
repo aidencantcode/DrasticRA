@@ -166,7 +166,7 @@ class PendingUnlock(
  */
 object OfflineProxy {
     const val HOST = "https://retroachievements.org/dorequest.php"
-    private const val UA = "DrasticRA/0.8.0 (Android) rcheevos/11.6"
+    private const val UA = "DrasticRA/0.9.0 (Android) rcheevos/11.6"
     private val lock = Any()
     private val flushing = AtomicInteger(0)
     private val ui = Handler(Looper.getMainLooper())

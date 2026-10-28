@@ -96,6 +96,7 @@ internal fun MainActivity.buildMenu(col: LinearLayout) {
     val pend = OfflineProxy.pendingCount()
     menuTile(col, "offline", "Offline Play", (if (NetMonitor.online) "Online" else "Offline") + "  -  " +
         RomCacher.cachedGames() + " games cached" + (if (pend > 0) "  -  $pend to sync" else ""))
+    menuTile(col, "emulators", "Emulators", "RetroArch, PPSSPP, ARMSX2 + PS3 / Vita / PS4 trophies")
     menuTile(col, "glass", "Glass", gm)
     menuTile(col, "anim", "Themes", bgLabel)
     menuTile(col, "look", "Appearance", (if (Pal.light) "Light" else "Dark") + " theme, accent, font, background")
@@ -204,7 +205,7 @@ internal fun MainActivity.buildLibraryPage(col: LinearLayout) {
             showPage("library", false)
         }
     ), ll(MATCH, WRAP, t = 8))
-    lc.addView(tv("Recent always shows Nintendo DS games only.", 11f, Pal.SUB), ll(WRAP, WRAP, t = 8))
+    lc.addView(tv("Recent and Recently earned show every console.", 11f, Pal.SUB), ll(WRAP, WRAP, t = 8))
     col.addView(lc, ll(MATCH, WRAP))
 }
 
@@ -268,6 +269,87 @@ internal fun MainActivity.buildOfflinePage(col: LinearLayout) {
             "while online are cached automatically too.", 11f, Pal.SUB
     ), ll(WRAP, WRAP, t = 8))
     col.addView(cc, ll(MATCH, WRAP, t = 12))
+}
+
+
+// ---------- emulators ----------
+internal fun MainActivity.buildEmulatorsPage(col: LinearLayout) {
+    val rc = sectionCard("RETROACHIEVEMENTS EMULATORS")
+    rc.addView(tv(
+        "Drastic RA can sit between RetroArch, PPSSPP or ARMSX2 and RetroAchievements (a local proxy on this device). " +
+            "Then they get offline play like DraStic - unlocks are kept and sent later - and Drastic RA's popups, edge glow, " +
+            "overlay and play time. Log in to RetroAchievements inside the emulator as usual.", 11f, Pal.SUB
+    ), ll(WRAP, WRAP, t = 8))
+    rc.addView(tv(
+        "Keep Drastic RA watching (Start watching) while you play them: when it is not running they cannot reach " +
+            "RetroAchievements - switch an emulator back to Direct if you stop using Drastic RA. Applying closes the emulator " +
+            "if it is open, because it would overwrite the change when it exits.", 11f, 0xFFE0A100.toInt()
+    ), ll(WRAP, WRAP, t = 8))
+    val hide = prefs.getBoolean("emu_hide_own", false)
+    rc.addView(rowOf(
+        chip("Show their own popups too", !hide) { prefs.edit().putBoolean("emu_hide_own", false).apply(); showPage("emulators", false) },
+        chip("Only Drastic RA popups", hide) { prefs.edit().putBoolean("emu_hide_own", true).apply(); showPage("emulators", false) }
+    ), ll(MATCH, WRAP, t = 10))
+    rc.addView(tv("(RetroArch and ARMSX2 can hide theirs; PPSSPP always shows its own.)", 10f, Pal.SUB), ll(WRAP, WRAP, t = 4))
+    val status = tv("", 12f, Pal.ACC1, true)
+    for (e in RaEmus.all) {
+        val on = prefs.getBoolean("emu_on_" + e.key, false)
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.VERTICAL
+        row.addView(tv(e.label + (if (on) "   -   via Drastic RA" else "   -   direct"), 15f, Pal.TEXT, true), ll(WRAP, WRAP, t = 14))
+        row.addView(rowOf(
+            chip("Use Drastic RA", on) {
+                status.text = "Setting up ${e.label}..."
+                Thread {
+                    val r = RaEmus.apply(this, e.key, true, prefs.getBoolean("emu_hide_own", false))
+                    runOnUiThread { AppLog.add(r); status.text = r; showPage("emulators", false) }
+                }.start()
+            },
+            chip("Direct", !on) {
+                status.text = "Restoring ${e.label}..."
+                Thread {
+                    val r = RaEmus.apply(this, e.key, false, false)
+                    runOnUiThread { AppLog.add(r); status.text = r; showPage("emulators", false) }
+                }.start()
+            }
+        ), ll(MATCH, WRAP, t = 6))
+        rc.addView(row, ll(MATCH, WRAP))
+    }
+    rc.addView(status, ll(WRAP, WRAP, t = 10))
+    rc.addView(tv("Proxy: " + (if (ProxyServer.running) "running on " + RaEmus.HOST else "starts with Start watching"), 11f, Pal.SUB),
+        ll(WRAP, WRAP, t = 6))
+    col.addView(rc, ll(MATCH, WRAP))
+
+    val tc = sectionCard("PS3 / PS VITA / PS4 TROPHIES")
+    tc.addView(tv(
+        "Trophies are read straight from ARMSX3 (PS3), Vita3K / Vita3K Plus (PS Vita) and Bachata S4 / S4+ (PS4) with root - " +
+            "they show in the Trophies tab, pop up while you play (with Start watching) and work in the overlay. " +
+            "Other RPCS3 / Vita3K / shadPS4 builds are found too.", 11f, Pal.SUB
+    ), ll(WRAP, WRAP, t = 8))
+    tc.addView(tv("${TrophyStore.games.size} games with trophies found", 14f, Pal.TEXT, true), ll(WRAP, WRAP, t = 10))
+    val found = tv("", 12f, Pal.SUB)
+    tc.addView(found, ll(WRAP, WRAP, t = 4))
+    Thread {
+        val pk = try { TrophyScanner.packages() } catch (_: Throwable) { emptyList() }
+        runOnUiThread { found.text = if (pk.isEmpty()) "No trophy emulators detected." else "Detected: " + pk.joinToString(", ") }
+    }.start()
+    val extra = field("Extra folders (comma separated)", prefs.getString("trophy_dirs", "") ?: "")
+    bindPref(extra, "trophy_dirs")
+    tc.addView(tv("If your emulator keeps its data somewhere unusual, add that folder here.", 11f, Pal.SUB), ll(WRAP, WRAP, t = 10))
+    tc.addView(extra, ll(MATCH, WRAP, t = 6))
+    tc.addView(pill("Scan for trophies now", true) {
+        found.text = "Scanning..."
+        Thread {
+            val games = try { TrophyScanner.scan(this, true) } catch (_: Throwable) { null }
+            if (games != null) TrophyStore.set(this, games)
+            runOnUiThread {
+                AppLog.add("Trophy scan: ${TrophyStore.games.size} games")
+                showPage("emulators", false)
+                renderTab()
+            }
+        }.start()
+    }, ll(MATCH, WRAP, t = 10))
+    col.addView(tc, ll(MATCH, WRAP, t = 12))
 }
 
 // ---------- glass ----------

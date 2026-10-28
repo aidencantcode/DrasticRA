@@ -77,7 +77,7 @@ class CaughtView(private val act: MainActivity, private val items: List<UnseenIt
         img.background = act.rounded(0xFF22252E.toInt(), 22)
         img.clipRound(22)
         val first = items.first()
-        if (first.badge.isNotEmpty()) Img.load("$MEDIA/Badge/${first.badge}.png", img) else {
+        if (first.badge.isNotEmpty()) Img.load(if (first.badge.startsWith("/")) first.badge else "$MEDIA/Badge/${first.badge}.png", img) else {
             img.scaleType = ImageView.ScaleType.CENTER_INSIDE
             img.setImageResource(R.drawable.ic_trophy)
             img.setColorFilter(Pal.GOLD1)

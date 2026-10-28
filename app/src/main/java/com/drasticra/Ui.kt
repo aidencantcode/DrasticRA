@@ -224,6 +224,12 @@ object Img {
     private fun fetch(url: String): Bitmap? {
         val hit = cache.get(url)
         if (hit != null) return hit
+        // local pictures (trophy icons mirrored from the emulators)
+        if (url.startsWith("/")) {
+            val b = BitmapFactory.decodeFile(url) ?: return null
+            cache.put(url, b)
+            return b
+        }
         val d = dir
         val f = if (d != null) File(d, name(url)) else null
         if (f != null && f.length() > 0) {

@@ -379,6 +379,14 @@ class Popup(private val ctx: Context) {
         enqueue(Data("Tracking game", title, "$pct%", "$got / $total achievements", url, "", pts, pct, true, secs()))
     }
 
+    /** PS3 / Vita / PS4 trophy unlocked: grade chip, grade-coloured edge glow, local trophy icon. */
+    fun trophy(name: String, detail: String, grade: String, icon: String, game: String, console: String, got: Int, total: Int) {
+        val pct = if (total > 0) got * 100 / total else -1
+        enqueue(Data(Grades.name(grade) + " trophy unlocked", name, Grades.name(grade), "$game  -  $console",
+            icon.ifEmpty { null }, detail, "$got / $total trophies", pct, true, secs(), Grades.glow(grade),
+            if (icon.isEmpty()) R.drawable.ic_trophy else 0, if (icon.isEmpty()) Grades.color(grade) else 0))
+    }
+
     /** Online / offline notices: a coloured edge glow (yellow for offline) and a short status popup. */
     fun status(label: String, title: String, sub: String, glow: IntArray?, chip: String, iconRes: Int, iconTint: Int) {
         enqueue(Data(label, title, chip, sub, null, "", "", -1, false, 4200L, glow, iconRes, iconTint))
