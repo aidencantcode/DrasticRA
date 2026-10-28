@@ -11,8 +11,15 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 
+/** A full-screen page over the home screen (game achievements, trophy list): back, L1 / R1 filters, slide in. */
+abstract class DetailPage(ctx: android.content.Context) : FrameLayout(ctx) {
+    abstract fun close()
+    abstract fun cycleFilter(step: Int)
+    abstract fun slideIn()
+}
+
 /** Every achievement of one game: unlocked ones in colour, locked ones dimmed, with how to earn each. */
-class GameDetailView(private val act: MainActivity, private val game: RaGame, private val onClose: () -> Unit) : FrameLayout(act) {
+class GameDetailView(private val act: MainActivity, private val game: RaGame, private val onClose: () -> Unit) : DetailPage(act) {
     private var detail: RaGameDetail? = null
     private var filter = 0
     /** title bar + progress card + filter chips: they dissolve together while the list scrolls over them */
@@ -94,7 +101,7 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
         topBlock.visibility = if (t >= 1f) View.INVISIBLE else View.VISIBLE
     }
 
-    fun slideIn() {
+    override fun slideIn() {
         alpha = 0f
         translationX = act.dp(60).toFloat()
         animate().alpha(1f).translationX(0f).setDuration(320).setInterpolator(DecelerateInterpolator(1.6f)).start()
@@ -102,7 +109,7 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
     }
 
     /** L1 / R1 on a controller: previous / next filter (All, Unlocked, Locked). */
-    fun cycleFilter(step: Int) {
+    override fun cycleFilter(step: Int) {
         if (detail == null) return
         filter = (filter + step + 3) % 3
         renderChips(true)
@@ -252,7 +259,7 @@ class GameDetailView(private val act: MainActivity, private val game: RaGame, pr
         return c
     }
 
-    fun close() {
+    override fun close() {
         if (closing) return
         closing = true
         animate().alpha(0f).translationX(act.dp(60).toFloat()).setDuration(240).withEndAction { onClose() }.start()

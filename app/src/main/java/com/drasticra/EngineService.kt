@@ -53,7 +53,7 @@ class EngineService : Service() {
         p.onOpenOverlay = { GameOverlay.show(applicationContext) }
         p
     }
-    private var ua = "DrasticRA/0.8.0"
+    private var ua = "DrasticRA/0.9.0"
     @Volatile private var loginState = 0
     @Volatile private var gameState = 0
     @Volatile private var gameTitle = ""
@@ -88,7 +88,7 @@ class EngineService : Service() {
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_OVERLAY) {
-            if (running && LiveGame.id != 0) {
+            if (running && GameOverlay.available()) {
                 GameOverlay.toggle(applicationContext)
             } else {
                 // nothing is being played: the notification just opens the app
@@ -180,7 +180,7 @@ class EngineService : Service() {
             this, 1, Intent(this, EngineService::class.java).setAction(ACTION_OVERLAY),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val playing = LiveGame.id != 0
+        val playing = GameOverlay.available()
         val b = Notification.Builder(this, "dsra")
             .setContentTitle("Drastic RA")
             .setContentText(if (playing) "$text  -  tap for achievements" else text)
@@ -204,7 +204,31 @@ class EngineService : Service() {
         getSystemService(NotificationManager::class.java).notify(1, notification("Drastic RA is $t...", sub))
     }
 
+    private var trophies: TrophyWatcher? = null
+
+    /**
+     * Everything the watcher does: the local achievement proxy (RetroArch / PPSSPP / ARMSX2), the trophy watcher
+     * (ARMSX3 / Vita3K / Bachata S4) and DraStic. If DraStic cannot be watched, the others keep running.
+     */
     private fun engine(folder: String, pkg: String) {
+        ProxyGames.popup = popup
+        ProxyServer.start(applicationContext)
+        val tw = TrophyWatcher(applicationContext, popup)
+        trophies = tw
+        tw.start()
+        try {
+            engineDs(folder, pkg)
+        } catch (e: Throwable) {
+            AppLog.add("DraStic watcher error: $e")
+        }
+        if (!stopFlag) {
+            AppLog.add("DraStic is not being watched - RetroArch, PPSSPP, ARMSX2 and trophy emulators still are.")
+            AppLog.setStatus("Watching other emulators", true)
+            while (!stopFlag) Thread.sleep(500)
+        }
+    }
+
+    private fun engineDs(folder: String, pkg: String) {
         val prefs = getSharedPreferences("dsra", MODE_PRIVATE)
         if (!Environment.isExternalStorageManager()) {
             AppLog.add("ERROR: 'All files access' is not enabled for Drastic RA.")
@@ -235,7 +259,7 @@ class EngineService : Service() {
 
         // controller combo (Button mapping page) that toggles the achievement overlay while you play
         val hk = HotkeyWatcher(applicationContext) {
-            if (LiveGame.id != 0) GameOverlay.toggle(applicationContext) else GameOverlay.hide()
+            if (GameOverlay.available()) GameOverlay.toggle(applicationContext) else GameOverlay.hide()
         }
         hotkeys = hk
         hk.start()
@@ -244,7 +268,7 @@ class EngineService : Service() {
         // 2) rcheevos + login
         Native.create()
         nativeReady = true
-        ua = "DrasticRA/0.8.0 " + Native.userAgentClause()
+        ua = "DrasticRA/0.9.0 " + Native.userAgentClause()
         val token = prefs.getString("token", "") ?: ""
         val user = prefs.getString("user_ra", "") ?: ""
         if (token.isEmpty() || user.isEmpty()) {
@@ -501,6 +525,13 @@ class EngineService : Service() {
         }
         LiveGame.clear()
         NetMonitor.removeListener(netListener)
+        try {
+            ProxyServer.stop()
+            trophies?.stop()
+        } catch (_: Throwable) {
+        }
+        trophies = null
+        TrophyLive.current = null
         try {
             hotkeys?.stop()
         } catch (_: Throwable) {

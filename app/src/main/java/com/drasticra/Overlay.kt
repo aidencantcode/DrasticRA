@@ -46,7 +46,11 @@ class LiveAch(
     val pct: Float,
     val unlockTime: Long,
     val bucket: Int,
-    val fresh: Boolean
+    val fresh: Boolean,
+    /** trophies: "P" / "G" / "S" / "B" (empty for RetroAchievements) */
+    val grade: String = "",
+    /** full picture path / URL when it is not a RetroAchievements badge */
+    val icon: String = ""
 ) {
     /** has a counter / partial progress, or rcheevos flags it as an active challenge / almost there */
     val inProgress: Boolean get() = !unlocked && (progress.isNotEmpty() || pct > 0f || bucket == 6 || bucket == 7)
@@ -156,10 +160,17 @@ object GameOverlay {
         if (view != null) hide() else show(ctx)
     }
 
-    /** Opens the overlay for the game the engine is watching. */
+    /** Opens the overlay for the game being played: a RetroAchievements game, else the trophy game in front. */
     fun show(ctx: Context) {
-        open(ctx.applicationContext) { LiveGame.snap(it) }
+        if (LiveGame.id == 0 && TrophyLive.current != null) {
+            open(ctx.applicationContext) { c -> TrophyLive.snap() ?: LiveGame.snap(c) }
+        } else {
+            open(ctx.applicationContext) { LiveGame.snap(it) }
+        }
     }
+
+    /** true when there is something to show (used by the notification and the button combo) */
+    fun available(): Boolean = LiveGame.id != 0 || TrophyLive.current != null
 
     /** Opens the overlay with sample data, so it can be previewed without a game. */
     fun showDemo(ctx: Context) {
@@ -621,6 +632,7 @@ class OverlayView(
     }
 
     private fun timeLine(s: OverlaySnap): String {
+        if (s.id < 0) return "This session  " + clock(s.sessionMs)
         val total = PlayTime.format(s.totalMs).ifEmpty { "<1m" }
         return "This session  " + clock(s.sessionMs) + "     Total  " + total
     }
@@ -631,7 +643,7 @@ class OverlayView(
         if (s.icon.isNotEmpty()) {
             iconView.clearColorFilter()
             iconView.scaleType = ImageView.ScaleType.CENTER_CROP
-            Img.load("$MEDIA/Images/${s.icon}.png", iconView)
+            Img.load(if (s.icon.startsWith("/")) s.icon else "$MEDIA/Images/${s.icon}.png", iconView)
         } else {
             iconView.setImageResource(R.drawable.ic_trophy)
             iconView.scaleType = ImageView.ScaleType.CENTER_INSIDE
@@ -646,7 +658,9 @@ class OverlayView(
             if (a.unlocked) ptsGot += a.points
         }
         countView.text = if (total == 0) "Loading achievements..." else "$got of $total completed"
-        ptsView.text = if (total == 0) "" else "$ptsGot / $ptsAll pts"
+        ptsView.text = if (total == 0) "" else if (s.list.any { it.grade.isNotEmpty() }) {
+            listOf("P", "G", "S", "B").joinToString("   ") { g -> Grades.name(g).take(1) + " " + s.list.count { it.grade == g && it.unlocked } }
+        } else "$ptsGot / $ptsAll pts"
         barHolder.removeAllViews()
         val pct = if (total > 0) got * 100 / total else 0
         barHolder.addView(ctx.progressBar(pct, 6, total > 0 && got >= total), FrameLayout.LayoutParams(MATCH, WRAP))
@@ -807,7 +821,8 @@ class OverlayView(
     }
 
     private fun badgeUrl(a: LiveAch): String? =
-        if (a.badge.isEmpty()) null else MEDIA + "/Badge/" + a.badge + (if (a.unlocked) "" else "_lock") + ".png"
+        if (a.icon.isNotEmpty()) a.icon
+        else if (a.badge.isEmpty()) null else MEDIA + "/Badge/" + a.badge + (if (a.unlocked) "" else "_lock") + ".png"
 
     private fun badge(a: LiveAch, sizeDp: Int): ImageView {
         val url = badgeUrl(a)
@@ -828,7 +843,7 @@ class OverlayView(
         line.orientation = LinearLayout.HORIZONTAL
         line.gravity = Gravity.CENTER_VERTICAL
         when {
-            a.unlocked && OfflineProxy.isPending(a.id) ->
+            a.unlocked && a.grade.isEmpty() && OfflineProxy.isPending(a.id) ->
                 line.addView(ctx.tv("\u2714  Completed - not synced yet", 13f, 0xFFE0A100.toInt(), true))
             a.unlocked -> line.addView(ctx.tv("\u2714  Completed", 13f, goodC, true))
             a.inProgress -> {
@@ -852,6 +867,14 @@ class OverlayView(
     }
 
     private fun pointsView(a: LiveAch): View {
+        if (a.grade.isNotEmpty()) {
+            // trophies: grade pill instead of points
+            val g = ctx.tv(Grades.name(a.grade), 13f, 0xFF1B1D26.toInt(), true)
+            ctx.pad(g, 12, 5, 12, 5)
+            g.background = ctx.rounded(Grades.color(a.grade), 14)
+            if (!a.unlocked) g.alpha = 0.55f
+            return g
+        }
         val box = LinearLayout(ctx)
         box.orientation = LinearLayout.HORIZONTAL
         box.gravity = Gravity.CENTER_VERTICAL

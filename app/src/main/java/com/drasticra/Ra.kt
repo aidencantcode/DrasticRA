@@ -27,7 +27,7 @@ class RaHome(val profile: RaProfile, val recent: List<RaGame>, val earned: List<
 class RaLogin(val ok: Boolean, val user: String, val token: String, val error: String)
 
 object Ra {
-    private const val UA = "DrasticRA/0.8.0"
+    private const val UA = "DrasticRA/0.9.0"
 
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 

@@ -86,7 +86,7 @@ class MainActivity : Activity() {
     private var home: RaHome? = null
     private var earnedAll: List<RaAch>? = null
     private var completion: List<RaGame>? = null
-    private var detail: GameDetailView? = null
+    private var detail: DetailPage? = null
     private var congrats: CaughtView? = null
     /** what had the controller highlight on the home screen before the drawer / a game page took over */
     private var lastMainFocus: View? = null
@@ -135,7 +135,8 @@ class MainActivity : Activity() {
             window.attributes = wlp
         }
         grid = prefs.getBoolean("grid", true)
-        tab = prefs.getInt("tab2", 0).coerceIn(0, 3)
+        tab = prefs.getInt("tab2", 0).coerceIn(0, 4)
+        TrophyStore.load(this)
 
         root = FrameLayout(this)
         root.setBackgroundColor(Pal.BG)
@@ -330,7 +331,7 @@ class MainActivity : Activity() {
         pad(profilePill, 8, 6, 14, 6)
         row.addView(profilePill, ll(WRAP, WRAP, r = 10))
 
-        val names = arrayOf("Recent", "Recently earned", "Earned", "Completion")
+        val names = arrayOf("Recent", "Recently earned", "Earned", "Completion", "Trophies")
         tabViews.clear()
         // four tabs: they scroll sideways on narrow screens instead of squashing the row
         val tabScroll = android.widget.HorizontalScrollView(this)
@@ -492,6 +493,7 @@ class MainActivity : Activity() {
         content.postOnAnimation { if (gen == renderGen) renderTab() }
         if ((tab == 1 || tab == 2) && earnedAll == null) fetchEarned()
         if (tab == 3 && completion == null) fetchCompletion()
+        if (tab == 4) scanTrophies(false)
     }
 
     // ---------- rendering ----------
@@ -553,6 +555,10 @@ class MainActivity : Activity() {
         content.removeAllViews()
         // a new list may clamp the scroll position, so re-check the header once it has been laid out
         contentScroll.post { updateHeaderFade(contentScroll.scrollY) }
+        if (tab == 4) {
+            renderTrophies(focusIdx)
+            return
+        }
         val dsOnly = prefs.getBoolean("ds_only", false)
         // card builders: views are created in small batches so long lists (Earned can hold thousands) never freeze
         val makers = ArrayList<() -> View>()
@@ -564,14 +570,14 @@ class MainActivity : Activity() {
                 if (h == null) {
                     emptyMsg = "Log in and add your Web API key in Settings (menu button) to see your games."
                 } else {
-                    // Recent is always Nintendo DS only (Earned and Completion keep the Library filter)
-                    for (g in h.recent) if (isDsConsole(g.console)) makers.add { gameCard(g, true) }
-                    if (makers.isEmpty()) emptyMsg = "No Nintendo DS games in your recent list yet."
+                    // every console: DS, and whatever RetroArch / PPSSPP / ARMSX2 play
+                    for (g in h.recent) makers.add { gameCard(g, true) }
+                    if (makers.isEmpty()) emptyMsg = "No games in your recent list yet."
                     playSig = computePlaySig()
                 }
             }
             1 -> {
-                // Recently earned: Nintendo DS only, newest first, offline unlocks waiting to sync on top
+                // Recently earned: every console, newest first, offline unlocks waiting to sync on top
                 for (pu in OfflineProxy.pending()) makers.add { achCard(pendingAch(pu), true) }
                 val e = earnedAll
                 if (e == null) {
@@ -579,11 +585,11 @@ class MainActivity : Activity() {
                     emptyMsg = if (loading) "Loading your recent unlocks..." else "Add your Web API key in Settings -> Account."
                 } else {
                     var n = 0
-                    for (a in e) if (isDsConsole(a.console) && n < 100) {
+                    for (a in e) if (n < 100) {
                         makers.add { achCard(a) }
                         n++
                     }
-                    if (makers.isEmpty()) emptyMsg = "No Nintendo DS achievements earned recently."
+                    if (makers.isEmpty()) emptyMsg = "No achievements earned recently."
                 }
             }
             2 -> {
@@ -673,11 +679,90 @@ class MainActivity : Activity() {
         step.run()
     }
 
+    // ---------- trophies tab ----------
+    private var lastTrophyScan = 0L
+
+    /** Looks for new trophies with root (in the background); [force] ignores the 90 s pause between scans. */
+    internal fun scanTrophies(force: Boolean) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - lastTrophyScan < 90000L && TrophyStore.games.isNotEmpty()) return
+        lastTrophyScan = now
+        Thread {
+            val games = try { TrophyScanner.scan(this, true) } catch (_: Throwable) { null }
+            if (games != null) TrophyStore.set(this, games)
+            runOnUiThread { if (tab == 4) renderTab() }
+        }.start()
+    }
+
+    private fun sectionHeader(text: String): View {
+        val t = sectionTitle(text)
+        pad(t, 6, 0, 6, 0)
+        return t
+    }
+
+    /** PS3 / PS Vita / PS4 trophies: newest unlocks, then every game (recently played first). */
+    private fun renderTrophies(focusIdx: Int) {
+        val games = TrophyStore.games
+        if (games.isEmpty()) {
+            val m = card(24)
+            pad(m, 18, 16, 18, 16)
+            val busy = TrophyScanner.scanning
+            if (busy) {
+                m.orientation = LinearLayout.HORIZONTAL
+                m.gravity = Gravity.CENTER_VERTICAL
+                m.addView(SpinnerView(this), ll(dp(30), dp(30), r = 14))
+            }
+            m.addView(tv(if (busy) "Looking for trophies in ARMSX3, Vita3K and Bachata S4..." else
+                "No trophies found yet. Play something in ARMSX3 (PS3), Vita3K (PS Vita) or Bachata S4 (PS4) - or set extra " +
+                    "folders in Settings -> Emulators.", 14f, Pal.SUB), ll(0, WRAP, 1f))
+            content.addView(m, ll(MATCH, WRAP))
+            m.popIn(0)
+            if (!busy) {
+                val b = pill("Scan for trophies", true) { scanTrophies(true); renderTab() }
+                content.addView(b, ll(MATCH, WRAP, t = 12))
+            }
+            return
+        }
+        val cards = ArrayList<View>()
+        val recent = TrophyStore.recent(6)
+        if (recent.isNotEmpty()) {
+            content.addView(sectionHeader("RECENTLY UNLOCKED TROPHIES"), ll(MATCH, WRAP, b = 8))
+            for ((g, t) in recent) {
+                val v = trophyCard(g, t)
+                content.addView(v, ll(MATCH, WRAP, b = 10))
+                cards.add(v)
+            }
+        }
+        content.addView(sectionHeader("GAMES  -  " + games.size), ll(MATCH, WRAP, t = 8, b = 8))
+        val cols = if (grid && resources.configuration.screenWidthDp >= 560) 2 else 1
+        var i = 0
+        while (i < games.size) {
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.clipChildren = false
+            for (c in 0 until cols) {
+                if (i + c < games.size) {
+                    val v = trophyGameCard(games[i + c])
+                    row.addView(v, ll(0, WRAP, 1f, l = if (c == 0) 0 else 12))
+                    cards.add(v)
+                } else row.addView(View(this), ll(0, 1, 1f, l = 12))
+            }
+            content.addView(row, ll(MATCH, WRAP, b = 12))
+            i += cols
+        }
+        for ((n, v) in cards.withIndex()) if (n < 10) v.popIn(n * 40L)
+        if (focusIdx >= 0 && cards.isNotEmpty()) {
+            val t = cards[minOf(focusIdx, cards.size - 1)]
+            t.post { if (!drawerOpen && detail == null) t.requestFocus() }
+        }
+        GlassBackdrop.invalidateAll()
+    }
+
     /** Sum of tracked play minutes over the games on the Recent tab, so we know when its cards are out of date. */
     private fun computePlaySig(): Long {
         var s = 0L
         val h = home ?: return 0L
-        for (g in h.recent) if (isDsConsole(g.console)) s += PlayTime.ms(this, g.id) / 60000L + 1L
+        for (g in h.recent) s += PlayTime.ms(this, g.id) / 60000L + 1L
         return s
     }
 
@@ -794,6 +879,17 @@ class MainActivity : Activity() {
         if (detail != null || g.id == 0) return
         lastMainFocus = currentFocus?.takeIf { isInside(it, mainLayer) }
         val d = GameDetailView(this, g) { closeDetailNow() }
+        detail = d
+        mainLayer.visibility = View.INVISIBLE
+        root.addView(d, 2, FrameLayout.LayoutParams(MATCH, MATCH))
+        d.slideIn()
+    }
+
+    /** PS3 / Vita / PS4 trophy list of one game. */
+    internal fun openTrophyDetail(g: TrophyGame) {
+        if (detail != null) return
+        lastMainFocus = currentFocus?.takeIf { isInside(it, mainLayer) }
+        val d = TrophyDetailView(this, g) { closeDetailNow() }
         detail = d
         mainLayer.visibility = View.INVISIBLE
         root.addView(d, 2, FrameLayout.LayoutParams(MATCH, MATCH))
@@ -1239,6 +1335,7 @@ class MainActivity : Activity() {
         "popups" -> "Popups"
         "buttons" -> "Button mapping"
         "offline" -> "Offline Play"
+        "emulators" -> "Emulators"
         else -> "Tools and log"
     }
 
@@ -1270,6 +1367,7 @@ class MainActivity : Activity() {
                 "popups" -> buildPopupsPage(body)
                 "buttons" -> buildButtonsPage(body)
                 "offline" -> buildOfflinePage(body)
+                "emulators" -> buildEmulatorsPage(body)
                 else -> buildToolsPage(body)
             }
         }
@@ -1300,7 +1398,7 @@ class MainActivity : Activity() {
     }
 
     /** Order of the tiles on the main settings page (see buildMenu). */
-    private val menuKeys = listOf("account", "library", "offline", "glass", "anim", "look", "popups", "buttons", "tools")
+    private val menuKeys = listOf("account", "library", "offline", "emulators", "glass", "anim", "look", "popups", "buttons", "tools")
 
     private fun toggleDrawer() {
         if (drawerOpen) closeDrawer() else openDrawer()
@@ -1500,6 +1598,7 @@ class MainActivity : Activity() {
         }
         AppLog.statusListener = { runOnUiThread { showStatus() } }
         refreshAll(false)
+        if (tab == 4) scanTrophies(false)
         // the Recent cards show play time, which the watcher keeps updating while the app is in the background
         if (tab == 0 && home != null && computePlaySig() != playSig) renderTab()
         val unseen = Unseen.take(this)
