@@ -363,6 +363,8 @@ object ProxyGames {
     private val sessionFresh = HashSet<Int>()
 
     private fun unlock(ctx: Context, a: Int, total: Long) {
+        // held back by the burst guard: no popup, no celebration
+        if (BurstGuard.blocked.contains(a)) return
         val g = gameId
         val p = patch(g)
         val info = p?.ach?.firstOrNull { it.optInt("ID") == a }

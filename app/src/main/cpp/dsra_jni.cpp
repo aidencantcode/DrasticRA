@@ -123,8 +123,9 @@ static void on_event(const rc_client_event_t* e, rc_client_t*) {
     switch (e->type) {
         case RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED: {
             const rc_client_achievement_t* a = e->achievement;
-            snprintf(buf, sizeof buf, "UNLOCK" SEP "%s" SEP "%s" SEP "%u" SEP "%s",
-                     S(a->title), S(a->description), (unsigned)a->points, S(a->badge_name));
+            /* the id (last field) lets the app hold back a suspicious burst of unlocks */
+            snprintf(buf, sizeof buf, "UNLOCK" SEP "%s" SEP "%s" SEP "%u" SEP "%s" SEP "%u",
+                     S(a->title), S(a->description), (unsigned)a->points, S(a->badge_name), (unsigned)a->id);
             push_event(buf);
             break;
         }

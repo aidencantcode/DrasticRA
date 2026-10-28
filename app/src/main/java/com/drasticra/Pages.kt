@@ -94,8 +94,10 @@ internal fun MainActivity.buildMenu(col: LinearLayout) {
     menuTile(col, "account", "Account", if (loggedIn) "Logged in as $user" else "Not logged in")
     menuTile(col, "library", "Library", prefs.getString("folder", "/storage/emulated/0/ROMs") ?: "")
     val pend = OfflineProxy.pendingCount()
+    val heldN = OfflineProxy.heldCount()
     menuTile(col, "offline", "Offline Play", (if (NetMonitor.online) "Online" else "Offline") + "  -  " +
-        RomCacher.cachedGames() + " games cached" + (if (pend > 0) "  -  $pend to sync" else ""))
+        RomCacher.cachedGames() + " games cached" + (if (pend > 0) "  -  $pend to sync" else "") +
+        (if (heldN > 0) "  -  $heldN held" else ""))
     menuTile(col, "emulators", "Emulators", "RetroArch, PPSSPP, ARMSX2 + PS3 / Vita / PS4 trophies")
     menuTile(col, "glass", "Glass", gm)
     menuTile(col, "anim", "Themes", bgLabel)
@@ -238,7 +240,55 @@ internal fun MainActivity.buildOfflinePage(col: LinearLayout) {
             }
         }, ll(MATCH, WRAP, t = 10))
     }
+    if (pend > 0) {
+        sc.addView(chip("Discard unsynced unlocks", false) {
+            OfflineProxy.discardPending()
+            AppLog.add("Discarded $pend unsynced offline unlocks.")
+            showPage("offline", false)
+            renderTab()
+        }, ll(MATCH, WRAP, t = 8))
+    }
     col.addView(sc, ll(MATCH, WRAP))
+
+    // ---- unlock burst protection ----
+    val gc = sectionCard("UNLOCK BURST PROTECTION")
+    val held = OfflineProxy.held()
+    gc.addView(tv(
+        "Loading a save state (like DraStic's Continue) can make memory jump so many achievements fire at once. " +
+            "When 3+ unlock within seconds (or 6+ within 2 minutes) they are held back - not sent - and the game is " +
+            "reloaded with your real progress. Genuine bursts can be sent from here.", 11f, Pal.SUB
+    ), ll(WRAP, WRAP, t = 8))
+    val guardOn = prefs.getBoolean("burst_guard", true)
+    gc.addView(rowOf(
+        chip("Protection on", guardOn) { prefs.edit().putBoolean("burst_guard", true).apply(); BurstGuard.load(this); showPage("offline", false) },
+        chip("Off", !guardOn) { prefs.edit().putBoolean("burst_guard", false).apply(); BurstGuard.load(this); showPage("offline", false) }
+    ), ll(MATCH, WRAP, t = 10))
+    if (held.isEmpty()) {
+        gc.addView(tv("Nothing held back.", 12f, Pal.SUB), ll(WRAP, WRAP, t = 10))
+    } else {
+        gc.addView(tv("${held.size} unlock${if (held.size == 1) "" else "s"} held back (not sent):", 13f, 0xFFE0A100.toInt(), true),
+            ll(WRAP, WRAP, t = 10))
+        for (h in held.take(40)) {
+            val line = tv("-  " + h.title + (if (h.game.isNotEmpty()) "   (" + h.game + ")" else ""), 12f, Pal.TEXT)
+            line.maxLines = 1
+            line.ellipsize = TextUtils.TruncateAt.END
+            gc.addView(line, ll(MATCH, WRAP, t = 2))
+        }
+        if (held.size > 40) gc.addView(tv("...and ${held.size - 40} more", 12f, Pal.SUB), ll(WRAP, WRAP, t = 2))
+        gc.addView(rowOf(
+            chip("Discard them", false) {
+                OfflineProxy.discardHeld()
+                AppLog.add("Discarded ${held.size} held unlocks.")
+                showPage("offline", false)
+            },
+            chip("They were real - send", false) {
+                OfflineProxy.releaseHeld()
+                AppLog.add("Sending ${held.size} held unlocks.")
+                showPage("offline", false)
+            }
+        ), ll(MATCH, WRAP, t = 10))
+    }
+    col.addView(gc, ll(MATCH, WRAP, t = 12))
 
     val cc = sectionCard("CACHE YOUR ROMS")
     cc.addView(tv(

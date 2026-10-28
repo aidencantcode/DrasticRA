@@ -27,12 +27,15 @@ class EngineService : Service() {
         const val ACTION_STOP = "com.drasticra.STOP"
         /** tap on the ongoing notification / popup button: show or hide the in-game achievement overlay */
         const val ACTION_OVERLAY = "com.drasticra.OVERLAY"
+        /** how long a newly seen game must stay put before it is tracked */
+        const val SETTLE_MS = 6000L
         @Volatile var running = false
     }
 
     private class HttpResult(val id: Int, val status: Int, val body: ByteArray)
 
     @Volatile private var stopFlag = false
+    private val ui = android.os.Handler(android.os.Looper.getMainLooper())
     private var rootProc: Process? = null
     private var hotkeys: HotkeyWatcher? = null
     /** online / offline changes while you play: shown as popups over the game (the app shows its own when in front) */
@@ -205,12 +208,21 @@ class EngineService : Service() {
     }
 
     private var trophies: TrophyWatcher? = null
+    /** set by the burst guard: the engine thread reloads the game with the real progress */
+    @Volatile private var reloadGame = false
 
     /**
      * Everything the watcher does: the local achievement proxy (RetroArch / PPSSPP / ARMSX2), the trophy watcher
      * (ARMSX3 / Vita3K / Bachata S4) and DraStic. If DraStic cannot be watched, the others keep running.
      */
     private fun engine(folder: String, pkg: String) {
+        BurstGuard.load(applicationContext)
+        BurstGuard.onTrip = { n ->
+            reloadGame = true
+            popup.status("Unlocks paused", "$n achievements at once - held back, nothing sent",
+                "Looks like a save state or memory jump. Review them in Settings -> Offline Play.",
+                NetNotice.YELLOW, "Held", R.drawable.ic_lock, NetNotice.YELLOW[0])
+        }
         ProxyGames.popup = popup
         ProxyServer.start(applicationContext)
         val tw = TrophyWatcher(applicationContext, popup)
@@ -294,6 +306,10 @@ class EngineService : Service() {
         var nextHdr = 0L
         var nextPhrase = 0L
         var nextList = 0L
+        // a new header is only loaded once it has stayed the same for SETTLE_MS (DraStic's "Continue" loads the
+        // save state a moment after the game appears; tracking during that jump is what fired fake unlocks)
+        var pendingHdr: ByteArray? = null
+        var pendingSince = 0L
         val period = 1_000_000_000L / 60
         var next = System.nanoTime()
         AppLog.setStatus("Waiting for DraStic...", true)
@@ -310,23 +326,48 @@ class EngineService : Service() {
                     AppLog.add("Lost connection to the RAM helper.")
                     break
                 }
-                nextHdr = now + (if (gameLoaded) 2000 else 3000)
+                nextHdr = now + (if (pendingHdr != null) 1000 else if (gameLoaded) 2000 else 3000)
                 // the root helper stores "is DraStic on screen" in the last header byte (see RootServer)
                 if (r == 1) visible = hdr[0x1FF].toInt() != 2
-                val same = current != null && java.util.Arrays.equals(current, hdr.copyOf(16))
+                val head16 = hdr.copyOf(16)
+                val same = current != null && java.util.Arrays.equals(current, head16)
                 if (r == 1 && !same) {
+                    if (current != null || gameLoaded) {
+                        // the game changed or restarted: stop tracking right away
+                        playStop()
+                        LiveGame.clear()
+                        if (gameLoaded) Native.unload()
+                        gameLoaded = false
+                        current = null
+                        gameTitle = ""
+                    }
+                    val pend = pendingHdr
+                    if (pend == null || !java.util.Arrays.equals(pend, head16)) {
+                        pendingHdr = head16
+                        pendingSince = now
+                        AppLog.setStatus("Game starting - letting it settle...", true)
+                    } else if (now - pendingSince >= SETTLE_MS && visible) {
+                        pendingHdr = null
+                        current = head16
+                        BurstGuard.reset()
+                        gameLoaded = loadGameFor(hdr, folder)
+                        next = System.nanoTime()
+                        if (!gameLoaded) AppLog.setStatus("Waiting for DraStic...", true)
+                    }
+                } else if (r == 1 && same && reloadGame) {
+                    // after a burst: unload and load again, so rcheevos takes your real progress from the server and
+                    // treats everything that is already true in memory as "seen" instead of firing it
+                    reloadGame = false
+                    AppLog.add("Reloading the game after the unlock burst...")
                     playStop()
                     LiveGame.clear()
-                    if (gameLoaded) {
-                        Native.unload()
-                        gameLoaded = false
-                    }
-                    current = hdr.copyOf(16)
-                    gameTitle = ""
-                    gameLoaded = loadGameFor(hdr, folder)
-                    next = System.nanoTime()
-                    if (!gameLoaded) AppLog.setStatus("Waiting for DraStic...", true)
-                } else if (r == 0 && current != null) {
+                    if (gameLoaded) Native.unload()
+                    gameLoaded = false
+                    current = null
+                    pendingHdr = head16
+                    pendingSince = now
+                } else if (r == 0 && (current != null || pendingHdr != null)) {
+                    pendingHdr = null
                     playStop()
                     LiveGame.clear()
                     if (gameLoaded) Native.unload()
@@ -497,10 +538,19 @@ class EngineService : Service() {
                 AppLog.add("UNLOCKED: " + p.getOrElse(1) { "" } + " (" + p.getOrElse(3) { "0" } + " pts)")
                 val pts = p.getOrElse(3) { "0" }
                 val ptsN = pts.toIntOrNull() ?: 0
-                Unseen.add(this, UnseenItem(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, ptsN, p.getOrElse(4) { "" }, gameTitle))
-                if (totalPoints > 0) totalPoints += ptsN
+                val id = p.getOrElse(5) { "0" }.toIntOrNull() ?: 0
+                val title = p.getOrElse(1) { "" }
+                val desc = p.getOrElse(2) { "" }
+                val badge = p.getOrElse(4) { "" }
+                val game = gameTitle
                 LiveGame.refreshWanted = true
-                popup.unlock(p.getOrElse(1) { "" }, p.getOrElse(2) { "" }, pts, p.getOrElse(4) { "" }, gameTitle, totalPoints)
+                // the popup waits for the burst guard's verdict, so a flood of fake unlocks never shows (or celebrates)
+                ui.postDelayed({
+                    if (BurstGuard.blocked.contains(id) || BurstGuard.tripped()) return@postDelayed
+                    Unseen.add(this, UnseenItem(title, desc, ptsN, badge, game))
+                    if (totalPoints > 0) totalPoints += ptsN
+                    popup.unlock(title, desc, pts, badge, game, totalPoints)
+                }, BurstGuard.HOLD_MS + 700L)
             }
             "PROGRESS" -> {
                 LiveGame.refreshWanted = true

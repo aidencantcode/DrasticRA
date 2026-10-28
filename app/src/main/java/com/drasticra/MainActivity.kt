@@ -126,6 +126,7 @@ class MainActivity : Activity() {
         Img.init(this)
         Hotkeys.load(this)
         Foil.load(this)
+        BurstGuard.load(this)
         NetMonitor.init(this)
         OfflineStore.init(this)
         Ra.cacheDir = java.io.File(filesDir, "webcache").also { it.mkdirs() }

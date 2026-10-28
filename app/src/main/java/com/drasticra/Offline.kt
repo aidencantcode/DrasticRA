@@ -151,6 +151,82 @@ object OfflineStore {
     }
 }
 
+
+/**
+ * Protection against a flood of fake unlocks. Emulators reset their achievement engine when a save state loads;
+ * DraStic does not tell us, so loading a state (e.g. "Continue") can make memory jump from empty to late-game values
+ * and every achievement fires at once. Each unlock is held a few seconds; if too many arrive together it is a burst:
+ * they are NOT sent, they go to a "held" list you can review (Settings -> Offline Play), and [onTrip] lets the engine
+ * reload the game with your real progress.
+ */
+object BurstGuard {
+    const val HOLD_MS = 4000L
+    private const val SHORT_WINDOW = 15000L
+    private const val SHORT_LIMIT = 3
+    private const val LONG_WINDOW = 120000L
+    private const val LONG_LIMIT = 6
+    private const val COOLDOWN = 90000L
+    private val times = ArrayList<Long>()
+    @Volatile private var trippedUntil = 0L
+    @Volatile var enabled = true
+    /** achievement ids held back in the current burst (their popups are skipped too) */
+    val blocked: MutableSet<Int> = java.util.Collections.synchronizedSet(HashSet<Int>())
+    /** called (on its own thread) when a burst is detected */
+    @Volatile var onTrip: ((Int) -> Unit)? = null
+
+    fun load(ctx: Context) {
+        enabled = ctx.prefs().getBoolean("burst_guard", true)
+    }
+
+    fun tripped(): Boolean = SystemClock.elapsedRealtime() < trippedUntil
+
+    /** Waits up to [HOLD_MS]; true = a normal unlock that may be sent, false = part of a burst (hold it). */
+    fun admit(a: Int): Boolean {
+        if (!enabled) return true
+        val t0 = SystemClock.elapsedRealtime()
+        synchronized(this) {
+            if (t0 < trippedUntil) {
+                blocked.add(a)
+                return false
+            }
+            times.add(t0)
+        }
+        Thread.sleep(HOLD_MS)
+        var tripNow = false
+        synchronized(this) {
+            val now = SystemClock.elapsedRealtime()
+            if (now < trippedUntil) {
+                blocked.add(a)
+                return false
+            }
+            times.removeAll { it < now - LONG_WINDOW - HOLD_MS }
+            val near = times.count { it >= t0 - SHORT_WINDOW }
+            val long = times.count { it >= now - LONG_WINDOW }
+            if (near >= SHORT_LIMIT || long >= LONG_LIMIT) {
+                trippedUntil = now + COOLDOWN
+                blocked.add(a)
+                tripNow = true
+            }
+        }
+        if (tripNow) {
+            val n = synchronized(this) { times.count { it >= t0 - SHORT_WINDOW } }
+            AppLog.add("BURST GUARD: $n unlocks at once - held back, not sent (save state / memory glitch?).")
+            onTrip?.let { cb -> Thread { cb(n) }.start() }
+            return false
+        }
+        return true
+    }
+
+    /** a new game / a fresh load: start counting from zero */
+    fun reset() {
+        synchronized(this) {
+            times.clear()
+            trippedUntil = 0L
+        }
+        blocked.clear()
+    }
+}
+
 /** An achievement unlocked while offline, waiting to be sent to RetroAchievements. */
 class PendingUnlock(
     val achId: Int, val gameId: Int, val title: String, val desc: String, val badge: String, val points: Int,
@@ -235,6 +311,14 @@ object OfflineProxy {
                 fail(e.message ?: "network error")
             }
         }
+        // unlock flood protection: hold every unlock briefly and keep back a burst instead of sending it
+        if (r == "awardachievement") {
+            val a = q["a"]?.toIntOrNull() ?: 0
+            if (a != 0 && !BurstGuard.admit(a)) {
+                hold(url, q)
+                return ok(JSONObject().put("Success", true).put("AchievementID", a).toString())
+            }
+        }
         if (NetMonitor.anyNetwork()) {
             try {
                 val res = http(url, post, ctype, ua)
@@ -291,6 +375,10 @@ object OfflineProxy {
             }
             "startsession" -> {
                 val g = q["g"]?.toIntOrNull() ?: 0
+                // without your saved progress every achievement would look locked and could fire again
+                if (!OfflineStore.has("unlocks_$g")) {
+                    return fail("Offline and your progress in this game is not cached yet (Settings -> Offline Play).")
+                }
                 val (soft, hard) = loadUnlocks(g)
                 synchronized(lock) {
                     val qa = readQueue()
@@ -418,6 +506,68 @@ object OfflineProxy {
             writeQueue(arr)
         }
         AppLog.add("Offline: saved unlock '" + o.optString("title") + "' - it will be sent when the internet is back.")
+    }
+
+    // ---------- held (burst) unlocks ----------
+    private fun readHeld(): JSONArray = try {
+        JSONArray(OfflineStore.get("held.json") ?: "[]")
+    } catch (_: Exception) {
+        JSONArray()
+    }
+
+    /** Keeps an unlock that came in a burst: not sent, waiting for you to review it. */
+    private fun hold(url: String, q: Map<String, String>) {
+        val a = q["a"]?.toIntOrNull() ?: return
+        val g = gameIdForHash(q["m"] ?: "") ?: 0
+        val info = if (g > 0) achInfo(g, a) else null
+        val o = JSONObject()
+        o.put("url", url).put("u", q["u"] ?: "").put("t", q["t"] ?: "").put("a", a).put("h", q["h"] ?: "0")
+            .put("m", q["m"] ?: "").put("o", q["o"]?.toLongOrNull() ?: 0L).put("at", System.currentTimeMillis() / 1000L)
+            .put("g", g).put("title", info?.optString("Title") ?: "Achievement $a").put("desc", info?.optString("Description") ?: "")
+            .put("badge", info?.optString("BadgeName") ?: "").put("pts", info?.optInt("Points") ?: 0)
+            .put("game", info?.optString("_game") ?: "").put("icon", info?.optString("_icon") ?: "")
+        synchronized(lock) {
+            val arr = readHeld()
+            for (i in 0 until arr.length()) if (arr.optJSONObject(i)?.optInt("a") == a) return
+            arr.put(o)
+            OfflineStore.put("held.json", arr.toString())
+        }
+        ui.post { for (l in queueListeners) l() }
+    }
+
+    fun heldCount(): Int = synchronized(lock) { readHeld().length() }
+
+    fun held(): List<PendingUnlock> {
+        val arr = synchronized(lock) { readHeld() }
+        val out = ArrayList<PendingUnlock>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            out.add(PendingUnlock(o.optInt("a"), o.optInt("g"), o.optString("title"), o.optString("desc"),
+                o.optString("badge"), o.optInt("pts"), o.optString("game"), o.optString("icon"), o.optLong("at")))
+        }
+        return out
+    }
+
+    /** "They were real": move held unlocks to the send queue. */
+    fun releaseHeld() {
+        synchronized(lock) {
+            val held = readHeld()
+            val q = readQueue()
+            for (i in 0 until held.length()) held.optJSONObject(i)?.let { q.put(it) }
+            OfflineStore.put("held.json", "[]")
+            writeQueue(q)
+        }
+        flushAsync()
+    }
+
+    fun discardHeld() {
+        synchronized(lock) { OfflineStore.put("held.json", "[]") }
+        ui.post { for (l in queueListeners) l() }
+    }
+
+    /** Drops every unsynced offline unlock (they will not be sent). */
+    fun discardPending() {
+        synchronized(lock) { writeQueue(JSONArray()) }
     }
 
     fun pendingCount(): Int = synchronized(lock) { readQueue().length() }
